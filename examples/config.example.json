@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "workspaceId": "demo-1",
+  "remote": {"target": "MY-SERVER", "project": "/home/me/project"},
+  "ssh": {},
+  "sync": {"delete": false, "maxSourceFileMB": 32, "exclude": ["cache"]},
+  "runtime": {"tmp": "/tmp/werodex", "maxChannels": 4, "maxLogSizeMB": 256, "logRetentionDays": 7}
+}

@@ -1,0 +1,51 @@
+{
+  "name": "werodex",
+  "version": "0.1.0",
+  "description": "Local-first remote development bridge",
+  "license": "Apache-2.0",
+  "type": "commonjs",
+  "bin": {
+    "werodex": "dist/cli.js",
+    "werodexd": "dist/daemon-cli.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "README-CN.md",
+    "LICENSE",
+    "SECURITY.md",
+    "docs",
+    "examples",
+    "assets/WerodexBar.jpg",
+    "werodex_skills"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && chmod 755 dist/cli.js dist/daemon-cli.js dist/askpass.js",
+    "prepare": "npm run build",
+    "test": "npm run build && node --test tests/*.test.js",
+    "release:check": "npm test && node scripts/release-check.cjs",
+    "prepublishOnly": "npm run release:check"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/XLYing23333/Werodex.git"
+  },
+  "homepage": "https://github.com/XLYing23333/Werodex#readme",
+  "bugs": {
+    "url": "https://github.com/XLYing23333/Werodex/issues"
+  },
+  "os": [
+    "linux"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}

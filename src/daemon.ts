@@ -1,0 +1,30 @@
+import * as net from 'node:net';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
+import {spawnSync,spawn} from 'node:child_process';
+import {AsyncLocalStorage} from 'node:async_hooks';
+import {randomUUID} from 'node:crypto';
+import {ensureMaster,closeMaster,connectionId,effective} from './ssh';
+import {WdxError,Config,privateDirectory} from './core';
+export const socketDir=()=>process.env.WERODEX_STATE_DIR??path.join(os.homedir(),'.local','state','werodex');
+export const socketPath=()=>path.join(socketDir(),'daemon.sock');
+const peerScript='import socket,struct,sys; s=socket.socket(fileno=3); d=s.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12); print(struct.unpack("3i",d)[1])';
+function peerUid(s:net.Socket){const fd=(s as any)._handle?.fd;if(!Number.isInteger(fd))throw new WdxError('WDX_IPC','Peer credentials unavailable');const p=spawnSync('python3',['-c',peerScript],{stdio:['ignore','pipe','pipe',fd],timeout:3000});if(p.status!==0)throw new WdxError('WDX_IPC','SO_PEERCRED validation failed');return Number(p.stdout.toString().trim());}
+type Lease={pid:number;start:string};
+const leases=new Map<string,Map<string,Lease>>();
+function processStart(pid:number):string|null{try{const stat=fs.readFileSync(`/proc/${pid}/stat`,'utf8'),end=stat.lastIndexOf(')');return stat.slice(end+2).trim().split(/\s+/)[19]??null;}catch{return null;}}
+function activeLeases(id:string){const group=leases.get(id)??new Map<string,Lease>();for(const [token,lease] of group)if(processStart(lease.pid)!==lease.start)group.delete(token);leases.set(id,group);return group;}
+const connecting=new Map<string,Promise<unknown>>();const backoff=new Map<string,{until:number;step:number}>();const heldLeases=new AsyncLocalStorage<Set<string>>();
+export async function serve(){privateDirectory(socketDir());const sp=socketPath();let existing:fs.Stats|undefined;try{existing=fs.lstatSync(sp);}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;}if(existing){if(!existing.isSocket()||existing.uid!==(process.getuid?.()??-1))throw new WdxError('WDX_DAEMON','Unsafe existing daemon socket');try{await rpc({op:'ping'},500);throw new WdxError('WDX_DAEMON','Daemon already running');}catch(e){if(e instanceof WdxError&&e.code==='WDX_DAEMON')throw e;fs.unlinkSync(sp);}}
+ const server=net.createServer(s=>{try{if(peerUid(s)!==(process.getuid?.()??-1)){s.destroy();return;}}catch{s.destroy();return;}let data='',handled=false;s.on('data',b=>{if(handled)return;data+=b.toString();if(data.length>65536){s.destroy();return;}const i=data.indexOf('\n');if(i<0)return;handled=true;let req:any;try{req=JSON.parse(data.slice(0,i));}catch{s.end(JSON.stringify({error:'bad request'})+'\n');return;}Promise.resolve(handle(req)).then(v=>s.end(JSON.stringify({ok:v})+'\n')).catch(e=>s.end(JSON.stringify({error:e.code??'WDX_DAEMON',message:e.message})+'\n'));});});server.listen(sp,()=>fs.chmodSync(sp,0o600));process.on('SIGTERM',()=>server.close(()=>process.exit(0)));}
+async function handle(q:any):Promise<unknown>{if(q.op==='ping')return 'pong';if(typeof q.target!=='string')throw new WdxError('WDX_IPC','Target required');const e=await effective(q.target),id=connectionId(e);if(q.op==='release'){activeLeases(id).delete(String(q.leaseId??''));return true;}if(q.op==='disconnect')return closeMaster(q.target);if(q.op==='lease'||q.op==='connect'){const b=backoff.get(id);if(b&&Date.now()<b.until)throw new WdxError('WDX_REMOTE_UNAVAILABLE','Remote temporarily unavailable. Werodex is reconnecting.');if(q.op==='lease'&&activeLeases(id).size>=Math.max(1,Math.min(16,Number(q.maxChannels??4))))throw new WdxError('WDX_CHANNEL_LIMIT','Maximum SSH channels reached');try{let pending=connecting.get(id);if(!pending){pending=ensureMaster(q.target);connecting.set(id,pending);pending.finally(()=>connecting.delete(id)).catch(()=>{});}await pending;backoff.delete(id);}catch(err){if(err instanceof WdxError&&err.code==='WDX_AUTH')throw err;const step=Math.min((b?.step??-1)+1,4),delays=[3000,10000,30000,60000,60000];backoff.set(id,{step,until:Date.now()+delays[step]});throw err;}if(q.op==='lease'){const pid=Number(q.pid),start=processStart(pid),token=String(q.leaseId??'');if(!Number.isSafeInteger(pid)||pid<=0||!start||!/^[a-f0-9-]{36}$/.test(token))throw new WdxError('WDX_IPC','Invalid lease owner');activeLeases(id).set(token,{pid,start});}return {connectionId:id};}throw new WdxError('WDX_IPC','Unknown operation');}
+export function rpc(q:unknown,timeout=30000):Promise<any>{return new Promise((resolve,reject)=>{try{privateDirectory(socketDir(),false);}catch(e){reject(e);return;}const s=net.createConnection(socketPath());let data='';const timer=setTimeout(()=>{s.destroy();reject(new WdxError('WDX_DAEMON','Daemon timeout'));},timeout);s.on('connect',()=>s.write(JSON.stringify(q)+'\n'));s.on('data',b=>{data+=b.toString();if(data.includes('\n')){clearTimeout(timer);s.end();try{const r=JSON.parse(data.split('\n')[0]);if(r.error)reject(new WdxError(r.error,r.message??r.error));else resolve(r.ok);}catch(e){reject(e);}}});s.on('error',e=>{clearTimeout(timer);reject(e);});});}
+export async function ensureDaemon(){privateDirectory(socketDir());try{await rpc({op:'ping'},500);return;}catch{}const child=spawn(process.execPath,[path.join(__dirname,'daemon-cli.js')],{detached:true,stdio:'ignore'});child.unref();for(let i=0;i<30;i++){await new Promise(r=>setTimeout(r,100));try{await rpc({op:'ping'},300);return;}catch{}}throw new WdxError('WDX_DAEMON','Could not start daemon');}
+export async function withLease<T>(config:Config,fn:()=>Promise<T>):Promise<T>{
+ const target=config.remote.target,id=connectionId(await effective(target)),held=heldLeases.getStore();
+ if(held?.has(id))return fn();
+ await ensureDaemon();const leaseId=randomUUID();await rpc({op:'lease',target,maxChannels:config.runtime.maxChannels,pid:process.pid,leaseId});
+ const next=new Set(held);next.add(id);
+ try{return await heldLeases.run(next,fn);}finally{await rpc({op:'release',target,leaseId}).catch(()=>{});}
+}

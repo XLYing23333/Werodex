@@ -1,0 +1,3 @@
+interface:
+  display_name: "Werodex Init"
+  short_description: "Set up a safe first Werodex sync with a remote project"

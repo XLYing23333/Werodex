@@ -1,0 +1,13 @@
+# Workspace configuration
+
+`werodex init` creates `.werodex/config.json`, `.werodex/review.json`, and a pending `.werodex/project-tree.md`; it does not sync or create a Sync Manifest. Fill the tree overview, mark data/output paths with `werodex exclude add PATH --reason TEXT`, and run `werodex review complete` before the first Source transfer. Existing workspaces with a successful Manifest remain approved. See `examples/config.example.json`. `workspaceId` identifies state and jobs; `remote.target` is an OpenSSH alias or hostname; `remote.project` is an absolute, specific project directory. `ssh.credentialRef` refers to the local Vault and is optional. `sync.delete` must remain false; `maxSourceFileMB` defaults to 32. `sync.exclude` accepts literal project-relative paths; `exclude add/remove` also maintains matching managed `.gitignore` blocks locally and remotely and `sync.excludeReasons`. Do not use glob characters. Code and documentation extensions bypass the default per-file Source size limit, while other files retain the `maxSourceFileMB` limit. There is no directory aggregate limit. Runtime defaults: `/tmp/werodex`, four channels, 256 MB of logs per job, seven days of retention.
+
+`werodex config --credential-ref <id>` adds a Vault reference. Use `werodex credential init`, `credential set <id>`, `credential list`, and `credential delete <id>` from a terminal. Never put a password, private key or OpenAI token in config. `init` adds `.werodex/` to the repository-local Git exclude file; the PathPolicyEngine also excludes it from Source sync.
+
+The optional `WERODEX_STATE_DIR` environment variable overrides the local daemon and ControlMaster state directory; an existing directory must be owned by the current UID with mode 0700; Werodex rejects a symlink or broader permissions. The remote job and conflict backup directories remain under the remote user's home.
+
+The local `.werodex/logs/`, `.werodex/assets/`, and `.werodex/git-tree.md` are local-only state. `checkpoint -m MESSAGE -- PATH...` commits only named Source files on the remote; local Git commits are optional. New Git repositories use `main`.
+
+`runtime.tmp` is an advisory temporary-output location for agents; it does not set a job working directory or `TMPDIR`. Jobs start in the remote project. Job metadata and logs live in the remote user state directory.
+
+Source transfers validate both endpoints before writing. `WDX_TRANSFER_POLICY` means a candidate is ignored, protected, oversized or unsafe at an endpoint; inspect the rules or consistently exclude the path and retry. Git tracked status does not bypass ignore rules.
