@@ -32,7 +32,7 @@ Werodex 不会在远端运行 Codex，不会把模型凭据复制到服务器，
 - rsync
 - Python 3
 
-远端需要 OpenSSH、Git、rsync、tmux、Bash 和 GNU coreutils。请先配置并验证 OpenSSH Host 别名与认证方式。远端项目目录必须已经存在。若尚无独立 Git 仓库，`init` 会在该目录创建 `main` 分支；已有仓库和分支保持原样。
+远端需要 OpenSSH、Git、rsync、tmux、Bash 和 GNU coreutils。请先配置并验证 OpenSSH Host 别名与认证方式。远端项目目录必须已经存在。若尚无独立 Git 仓库，`init` 会在该目录创建 `main` 分支；已有仓库和分支保持原样。两端项目必须是独立 Git 工作区根目录（支持 worktree）；父级仓库会触发 `WDX_GIT_PARENT`，需先在项目目录手动执行 `git init -b main`。
 
 ## 安装 CLI 与 Skill
 
@@ -112,13 +112,13 @@ werodex logs <job-id>
 功能完成后，只提交本次改动的远端 Source，并在本地记录：
 
 ```bash
-werodex checkpoint -m "完成示例功能" -- src/main.py .gitignore
+werodex checkpoint -m "完成示例功能" -- src/main.py
 werodex git-tree
-# 先在 .werodex/entry.md 写好“修改内容”和“收益”两节。
+# 先在 .werodex/entry.md 写好“修改内容”“收益”“验证结果”和“下一步”。
 werodex log add --file .werodex/entry.md --asset /home/me/demo/outputs/preview.png
 ```
 
-没有必要附件时省略 `--asset`。本地专用文档先执行 `werodex exclude add PATH --reason "local-only: ..."`，再创建文件。运行 `werodex help` 查看完整命令列表。已有工作区可重新运行 `werodex review complete`，刷新生成的 `AGENTS.md` 受管区块。
+本地产生的图表、截图或视频使用可重复的 `--local-asset PATH`，可与远端 `--asset` 混用；纯本地日志无需连接远端。没有可视化时在条目中说明原因。本地专用文档先执行 `werodex exclude add PATH --reason "local-only: ..."`，再创建文件。运行 `werodex help` 查看完整命令列表。已有工作区可重新运行 `werodex review complete`，刷新生成的 `AGENTS.md` 受管区块。
 
 ### 常用命令
 
@@ -136,7 +136,7 @@ werodex log add --file .werodex/entry.md --asset /home/me/demo/outputs/preview.p
 | `werodex fetch ABSOLUTE_PATH` | 下载一个明确指定的远端文件 |
 | `werodex checkpoint -m "说明" -- PATH...` | 同步并仅提交指定的远端 Source 文件 |
 | `werodex git-tree` | 将有界的远端 Git 提交图与工作区状态写到本地 `.werodex/git-tree.md` |
-| `werodex log add --file ENTRY.md [--asset 远端绝对路径]...` | 头插当天工作日志，并按需拉取少量附件 |
+| `werodex log add --file ENTRY.md [--asset 远端绝对路径]... [--local-asset 本地路径]...` | 头插当天工作日志，归档本地或远端附件并内嵌媒体 |
 | `werodex doctor` | 检查本地和远端依赖 |
 | `werodex credential` | 查看或管理可选的本地 Vault |
 
@@ -146,6 +146,7 @@ werodex log add --file .werodex/entry.md --asset /home/me/demo/outputs/preview.p
 
 Werodex 将文件分为源码、忽略项、大文件、受保护的远端专属数据和显式获取的产物。受保护路径规则优先于 `.gitignore`；将数据目录写入 `.gitignore` 本身并不构成保护机制。
 
+- 所有层级的 `AGENTS.md`、`.gitignore`、`.ignore`、`.dockerignore`、`.rgignore` 都保留在各自工作区，不参与 sync、pull、rebuild、diff 或 checkpoint；旧冲突报告也不能覆盖这些文件。`exclude add/remove` 仅修改两端根目录 `.gitignore` 的受管区块，保留原有规则和权限。成功同步会移除旧 Manifest 中的规则文件基线。
 - 自动源码操作会跳过 `datasets/`、`data/`、`pretrained/`、`checkpoints/`、`outputs/`、`wandb/`、`runs/` 和 `artifacts/` 等远端专属目录。
 - `.werodex/`、`.git/`、`node_modules/`、环境变量文件、SSH 目录和配置的排除路径不会作为源码同步。
 - 非源码文件超过 32 MB 时默认报告并跳过。常见代码和文档后缀（如 `.py`、`.c`、`.cpp`、`.html`、`.js`、`.go`、`.ts`、`.md`）不因大小自动忽略。`.pth`、`.tar.gz`、`.json` 不按后缀一概排除；应明确标记数据和产物目录。非源码大文件确需同步时，可使用 `sync --allow-large` 或 `pull --allow-large`。
@@ -156,7 +157,7 @@ Werodex 将文件分为源码、忽略项、大文件、受保护的远端专属
 
 ### 任务与输出
 
-完成一项功能后，Agent 应验证、`sync`、通过 `checkpoint -m "说明" -- PATH...` 只提交本次变更的远端 Source，并运行 `git-tree`。本地 Git 用于忽略和状态判断，不要求本地 commit。日志由 Agent 撰写包含“修改内容”和“收益”的 Markdown，再显式执行 `log add --file`；每个工作日使用一个 `logs-YYYY-MM-DD.md`，按上海时间 04:00 切日，新条目位于文件顶部。最多指定 5 个附件，每个默认不超过 32 MB；日志及附件只保存在本地 `.werodex/`。
+完成一项功能后，Agent 应验证、`sync`、通过 `checkpoint -m "说明" -- PATH...` 只提交本次变更的远端 Source，并运行 `git-tree`。本地 Git 用于忽略和状态判断，不要求本地 commit。每次阶段验证、实验结果、功能完成或本地交付完成后，Agent 必须立即撰写包含“修改内容”“收益”“验证结果”和“下一步”的 Markdown，并执行 `log add --file`，不等整个任务结束。已有相关图片、截图、动画或视频时必须附加代表性文件；没有适用可视化时说明原因。每个工作日使用一个 `.werodex/logs/logs-YYYY-MM-DD.md`，按上海时间 04:00 切日，新条目位于顶部。远端 `--asset` 与本地 `--local-asset` 合计最多 5 个附件，每个不超过 32 MB；本地文件复制而非移动，统一存入 `.werodex/assets/<工作日>/` 并记录大小和 SHA-256。图片使用 Markdown 内嵌，MP4/WebM 使用 HTML video 并附文件链接，其他格式保留链接。Agent 应读取保存后的日志并检查媒体展示；预览器不支持视频时验证回退链接并注明限制，聊天中的媒体使用本地绝对路径。
 
 短命令通过 SSH 直接运行。分离任务使用远端 `tmux`，本地终端或 daemon 断开后仍会继续。远端任务日志默认每个任务最多 256 MB，已完成任务保留 7 天。`logs` 默认返回有限输出；需要人工排查时可显式使用 `logs --raw`。
 

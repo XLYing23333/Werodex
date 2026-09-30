@@ -11,14 +11,17 @@ const {PathPolicyEngine}=require('../dist/policy');
 const {ensureLocalManagedIgnore}=require('../dist/review');
 const realRun=core.run;
 let transfers=0;
-core.run=async(file,args,opts)=>{if(file==='rsync'){transfers++;throw Error('Unexpected rsync before policy approval');}return realRun(file,args,opts);};
+core.run=async(file,args,opts)=>{if(file==='ssh'){
+ if(args[0]==='-G')return {code:0,stdout:'hostname test\nuser test\nport 22\n',stderr:''};
+ assert.ok(args.includes('test')&&args.at(-1).startsWith('bash -s -- '));return realRun('bash',['-c',args.at(-1)],opts);
+ }if(file==='rsync'){transfers++;throw Error('Unexpected rsync before policy approval');}return realRun(file,args,opts);};
 daemon.withLease=async(c,fn)=>fn();
 // Execute the production remote scripts in an isolated second local repository.
 ssh.remote=async(c,script,args=[],timeout=60000,maxBytes)=>realRun('bash',['-s','--',...args],{input:script,timeout,maxBytes});
 const {sync}=require('../dist/sync');
 function setup(){
  const base=fs.mkdtempSync(path.join(os.tmpdir(),'wdx-transfer-'));
- const local=path.join(base,'local'),remote=path.join(base,'remote');
+ const local=path.join(base,'local'),remote=path.join(base,'remote');process.env.WERODEX_STATE_DIR=path.join(base,'transport');
  for(const dir of [local,remote]){fs.mkdirSync(dir);cp.execFileSync('git',['init','-q','-b','main',dir]);ensureLocalManagedIgnore(dir);}
  const c=core.defaultConfig('test',remote);
  core.atomicJson(path.join(local,'.werodex','review.json'),{status:'complete'});
@@ -54,6 +57,6 @@ test('both policies permit ordinary new Source and protect common credential fil
   assert.equal((await policy.classify('data')).kind,'PROTECTED');
   const localFiles=await policy.sourceFiles();const scan=await ssh.remote(c,PathPolicyEngine.remoteScanScript(),[local,'33554432']);assert.equal(scan.code,0,scan.stderr);
   const remoteFiles=scan.stdout.trim().split('\n').filter(Boolean).map(x=>Buffer.from(x.split(' ')[0],'base64').toString());
-  assert.deepEqual([...localFiles.keys()],['.gitignore']);assert.deepEqual(remoteFiles,['.gitignore']);
+  assert.deepEqual([...localFiles.keys()],[]);assert.deepEqual(remoteFiles,[]);
  }finally{fs.rmSync(base,{recursive:true,force:true});}
 });

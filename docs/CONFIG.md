@@ -11,3 +11,9 @@ The local `.werodex/logs/`, `.werodex/assets/`, and `.werodex/git-tree.md` are l
 `runtime.tmp` is an advisory temporary-output location for agents; it does not set a job working directory or `TMPDIR`. Jobs start in the remote project. Job metadata and logs live in the remote user state directory.
 
 Source transfers validate both endpoints before writing. `WDX_TRANSFER_POLICY` means a candidate is ignored, protected, oversized or unsafe at an endpoint; inspect the rules or consistently exclude the path and retry. Git tracked status does not bypass ignore rules.
+
+Both directories must be independent Git working-tree roots, including linked worktrees. `init` checks both boundaries before creating repositories or managed files. `WDX_GIT_PARENT` requires an explicit project-local repository before retrying; existing workspaces are checked during Source and Git operations too.
+
+Rule files (`AGENTS.md`, `.gitignore`, `.ignore`, `.dockerignore`, `.rgignore`) at every level never participate in automatic Source operations, checkpoint, or conflict recovery. Exclusion commands maintain only the managed root `.gitignore` blocks; user content and permissions remain separate on each side.
+
+`log add --file ENTRY.md [--asset REMOTE_PATH]... [--local-asset PATH]...` archives up to five combined attachments, each at most 32 MB, under `.werodex/assets/<work-day>/`. Local paths resolve against the workspace and are copied, not moved. Purely local logs need no SSH connection. Images are embedded in Markdown, MP4/WebM use HTML video plus a fallback link, and other formats use links. Entries are required at every milestone; include changes, benefits, verification, next steps, and relevant visuals or a reason none applies. Run `review complete` to refresh the generated AGENTS instructions in an existing reviewed workspace.

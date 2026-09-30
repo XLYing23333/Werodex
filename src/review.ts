@@ -23,7 +23,14 @@ function replaceBlock(old:string,start:string,end:string,body:string){const a=ol
 export function initReview(root:string){privateDirectory(path.join(root,'.werodex'));const f=treePath(root);if(safeRead(f)!==null)throw new WdxError('WDX_REVIEW','Project tree already exists');writeText(f,`# Project tree\n\n${pending}\n\n## Overview\nReplace this line with a bounded, reviewed overview. Use \`werodex tree\` for an initial view.\n\n## Excluded paths\n${treeStart}\n(none)\n${treeEnd}\n`);writeText(reviewPath(root),JSON.stringify({status:'pending'},null,2)+'\n');}
 export function isReviewed(root:string){const raw=safeRead(reviewPath(root));if(raw!==null){try{return JSON.parse(raw).status==='complete';}catch{return false;}}try{const x=JSON.parse(fs.readFileSync(statePath(root),'utf8'));return Number(x.version)>0&&!!x.lastSync;}catch{return false;}}
 export function assertReviewed(root:string){if(!isReviewed(root))throw new WdxError('WDX_REVIEW_REQUIRED','Review .werodex/project-tree.md, mark data/output paths with werodex exclude add, then run werodex review complete before syncing');}
-export function completeReview(root:string){const content=safeRead(treePath(root));if(!content||content.includes(pending)||!content.includes('## Overview')||!/## Overview\s*\n(?:(?!## Excluded paths)[\s\S])*?\S/.test(content)||content.includes('Replace this line with a bounded, reviewed overview'))throw new WdxError('WDX_REVIEW','Complete the project tree overview and remove the pending marker first');writeText(reviewPath(root),JSON.stringify({status:'complete',completed:new Date().toISOString()},null,2)+'\n');}
+export function completeReview(root:string){
+ const content=safeRead(treePath(root));
+ // Successful legacy workspaces may predate project-tree.md; refresh their rules
+ // without reinitializing or discarding the existing Source baseline.
+ const legacyRefresh=content===null&&isReviewed(root);
+ if(!legacyRefresh&&(!content||content.includes(pending)||!content.includes('## Overview')||!/## Overview\s*\n(?:(?!## Excluded paths)[\s\S])*?\S/.test(content)||content.includes('Replace this line with a bounded, reviewed overview')))throw new WdxError('WDX_REVIEW','Complete the project tree overview and remove the pending marker first');
+ writeText(reviewPath(root),JSON.stringify({status:'complete',completed:new Date().toISOString()},null,2)+'\n');
+}
 export function boundedTree(root:string,relative='',depth=2,perDirectory=40,totalLimit=200){
  const base=relative?normalizeExclude(relative):'';let at=root;
  for(const part of base.split('/').filter(Boolean)){at=path.join(at,part);const s=fs.lstatSync(at);if(!s.isDirectory())throw new WdxError('WDX_PATH','Tree path is not a directory: '+relative);}

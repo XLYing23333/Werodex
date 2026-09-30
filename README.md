@@ -32,7 +32,7 @@ Werodex currently supports **Linux** and **Node.js 20 or later**. Install these 
 - rsync
 - Python 3
 
-The remote host needs OpenSSH, Git, rsync, tmux, Bash, and GNU core utilities. Configure and verify an OpenSSH host alias and authentication before setup. The remote project directory must already exist. If it has no independent Git repository, `init` creates one on `main`; existing repositories and branches are unchanged.
+The remote host needs OpenSSH, Git, rsync, tmux, Bash, and GNU core utilities. Configure and verify an OpenSSH host alias and authentication before setup. The remote project directory must already exist. If it has no independent Git repository, `init` creates one on `main`; existing repositories and branches are unchanged. Both projects must be independent Git working-tree roots (linked worktrees are supported). A parent repository triggers `WDX_GIT_PARENT`; first run `git init -b main` in the project directory explicitly.
 
 ## Install the CLI and Skill
 
@@ -114,13 +114,13 @@ werodex logs <job-id>
 After a feature is complete, commit only its remote Source paths and record the work locally:
 
 ```bash
-werodex checkpoint -m "Complete example feature" -- src/main.py .gitignore
+werodex checkpoint -m "Complete example feature" -- src/main.py
 werodex git-tree
-# First write Changes and Benefits sections to .werodex/entry.md.
+# First write Changes, Benefits, Verification, and Next steps to .werodex/entry.md.
 werodex log add --file .werodex/entry.md --asset /home/me/demo/outputs/preview.png
 ```
 
-Omit `--asset` when no attachment is needed. For a local-only document, run `werodex exclude add PATH --reason "local-only: ..."` before creating it. Use `werodex help` for the complete command list. Existing reviewed workspaces can rerun `werodex review complete` to refresh the generated `AGENTS.md` block.
+Use repeatable `--local-asset PATH` for local plots, screenshots, or videos; it can be mixed with remote `--asset`. Purely local logging needs no remote connection. State the reason in the entry if no visual applies. For a local-only document, run `werodex exclude add PATH --reason "local-only: ..."` before creating it. Use `werodex help` for the complete command list. Existing reviewed workspaces can rerun `werodex review complete` to refresh the generated `AGENTS.md` block.
 
 ### Common commands
 
@@ -138,7 +138,7 @@ Omit `--asset` when no attachment is needed. For a local-only document, run `wer
 | `werodex fetch ABSOLUTE_PATH` | Download one explicitly selected remote file |
 | `werodex checkpoint -m "message" -- PATH...` | Sync and commit only the named remote Source files |
 | `werodex git-tree` | Save a bounded remote Git graph and status to local `.werodex/git-tree.md` |
-| `werodex log add --file ENTRY.md [--asset REMOTE_PATH]...` | Prepend a daily local work-log entry and fetch selected small assets |
+| `werodex log add --file ENTRY.md [--asset REMOTE_PATH]... [--local-asset PATH]...` | Prepend a daily log, archive local or remote assets, and embed media |
 | `werodex doctor` | Check local and remote prerequisites |
 | `werodex credential` | Inspect or manage the optional local Vault |
 
@@ -148,6 +148,7 @@ For conflicts, `sync` writes a report and a remote copy under `.werodex/conflict
 
 Werodex classifies files as Source, ignored, large, protected remote-only data, or explicitly fetched artifacts. Protected-path rules take precedence over `.gitignore`; adding a data folder to `.gitignore` is not the protection mechanism.
 
+- `AGENTS.md`, `.gitignore`, `.ignore`, `.dockerignore`, and `.rgignore` at every level remain separate on each side: sync, pull, rebuild, diff, and checkpoint exclude them. Old conflict reports cannot overwrite them either. `exclude add/remove` updates only the managed root `.gitignore` block on each side, preserving user rules and permissions. Successful sync removes legacy rule-file baselines from the Manifest.
 - Automatic Source operations skip remote-only directories such as `datasets/`, `data/`, `pretrained/`, `checkpoints/`, `outputs/`, `wandb/`, `runs/`, and `artifacts/`.
 - `.werodex/`, `.git/`, `node_modules/`, environment files, SSH directories, and configured exclusions are not synced as Source.
 - Non-source files over 32 MB are reported and skipped by default. Common code and documentation extensions such as `.py`, `.c`, `.cpp`, `.html`, `.js`, `.go`, `.ts`, and `.md` remain Source regardless of size. `.pth`, `.tar.gz`, and `.json` are not automatically classified as artifacts; mark their data/output directories explicitly. Use `sync --allow-large` or `pull --allow-large` when needed for a non-source file.
@@ -158,7 +159,7 @@ Werodex classifies files as Source, ignored, large, protected remote-only data, 
 
 ### Jobs and output
 
-After a feature is verified, the agent should sync, run `checkpoint -m "message" -- PATH...` for only that feature's remote Source, and refresh `git-tree`. Local Git serves ignore and status checks; no local commit is required. The agent writes a Markdown entry with Changes and Benefits sections, then calls `log add --file`. Each work day has one `logs-YYYY-MM-DD.md`, with a 04:00 Asia/Shanghai boundary and newest entries first. At most five explicit remote assets may be attached, each capped at 32 MB by default. Logs and assets remain local under `.werodex/`.
+After a feature is verified, the agent should sync, run `checkpoint -m "message" -- PATH...` for only that feature's remote Source, and refresh `git-tree`. Local Git serves ignore and status checks; no local commit is required. At every stage verification, experiment result, completed feature, or local-only delivery, the agent must immediately write Changes, Benefits, Verification, and Next steps and call `log add --file`; recording must not wait until the whole task ends. Attach representative plots, screenshots, images, animations, and videos whenever relevant visuals exist; otherwise state why none applies. Each work day has one `.werodex/logs/logs-YYYY-MM-DD.md`, with a 04:00 Asia/Shanghai boundary and newest entries first. Repeat `--asset` for remote files and `--local-asset` for local files, up to five combined files, each capped at 32 MB. Local assets are copied rather than moved; both kinds are archived in `.werodex/assets/<work-day>/` with size and SHA-256. Images use Markdown embeds; MP4/WebM use HTML video plus a fallback file link; other formats retain links. Read the saved log and verify media previews, recording any video-preview limitation and checking the fallback link. Use absolute local paths for media displayed in chat.
 
 Short commands run directly over SSH. Detached jobs use remote `tmux` and survive disconnection of the local terminal or daemon. Job logs are retained remotely with a default 256 MB per-job limit and seven-day completed-job retention. `logs` returns bounded output; `logs --raw` is available for explicit diagnosis.
 
