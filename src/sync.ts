@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {Config,atomicJson,statePath,WdxError,run,shQuote} from './core';
 import {PathPolicyEngine} from './policy';
-import {remote,effective,controlPath,rsyncSsh,gitState,assertRemoteGit} from './ssh';
+import {remote,effective,controlPath,rsyncSsh,gitState,assertRemoteGit,remoteAction} from './ssh';
 import {localGitRoot,gitBoundaryScript,assertGitResult} from './git';
 import {withLease,withTransferLease} from './daemon';
 import {assertReviewed,assertManagedIgnoreConsistent} from './review';
@@ -15,11 +15,13 @@ const empty=():Manifest=>({version:0,files:{},localHead:null,remoteHead:null,las
 export function readManifest(root:string):Manifest{try{return JSON.parse(fs.readFileSync(statePath(root),'utf8'));}catch{return empty();}}
 const reportFile=(root:string,id:string)=>path.join(root,'.werodex','conflicts',id,'report.json');
 export function readReport(root:string,id:string):Report{if(!/^[a-f0-9-]{36}$/.test(id))throw new WdxError('WDX_CONFLICT','Invalid conflict ID');try{const x=JSON.parse(fs.readFileSync(reportFile(root,id),'utf8')) as Report;if(x.id!==id||!Array.isArray(x.conflicts)||x.conflicts.some(c=>!c.path||path.posix.isAbsolute(c.path)||c.path.split('/').includes('..')||PathPolicyEngine.isNeverSource(c.path)))throw new Error('unsafe report');return x;}catch{throw new WdxError('WDX_CONFLICT','Conflict report missing or invalid');}}
-export async function remoteInventory(c:Config,skippedLarge:{path:string;size:number}[]=[]):Promise<Map<string,Entry>>{const script=PathPolicyEngine.remoteScanScript();
- const r=await remote(c,script,[c.remote.project,String(c.sync.maxSourceFileMB*1024*1024),...(c.sync.exclude??[])],120000);assertGitResult(r,'WDX_INVENTORY');const m=new Map<string,Entry>();for(const line of r.stdout.trim().split('\n')){if(!line)continue;if(line.startsWith('L ')){const [,b,n]=line.split(' ');skippedLarge.push({path:Buffer.from(b,'base64').toString(),size:Number(n)});continue;}const [b,n,h]=line.split(' ');const p=Buffer.from(b,'base64').toString();if(!p||p.startsWith('/')||p.split('/').includes('..'))continue;m.set(p,{size:Number(n),hash:h});}return m;}
+export async function remoteInventory(c:Config,skippedLarge:{path:string;size:number}[]=[],options:{paths?:string[];full?:boolean}={}):Promise<Map<string,Entry>>{
+ const result=await remoteAction(c,'scan',options,{timeout:120000});const output=new Map<string,Entry>();
+ for(const file of result.value.files)output.set(file.path,{size:file.size,hash:file.hash});skippedLarge.push(...result.value.skippedLarge);return output;
+}
 function compare(a:Entry|null,b:Entry|null){return a?.hash===b?.hash&&a?.size===b?.size;}
 export function nextManifestFiles(local:Map<string,Entry>,rem:Map<string,Entry>,base:Manifest):Manifest['files']{
- const files:Manifest['files']={};
+ const files:Manifest['files']=Object.create(null);
  for(const p of new Set([...Object.keys(base.files),...local.keys(),...rem.keys()])){
   if(PathPolicyEngine.isNeverSource(p))continue;
   const l=local.get(p),r=rem.get(p);
@@ -65,7 +67,7 @@ export function backupLocal(root:string,report:Report){
  for(const x of report.conflicts){const src=path.join(root,x.path),dst=path.join(dir,x.path);fs.mkdirSync(path.dirname(dst),{recursive:true,mode:0o700});fs.copyFileSync(src,dst);}
  return dir;
 }
-export async function sync(c:Config,root:string,direction:'sync'|'pull',opts:{resolve?:string;keepLocal?:string;keepRemote?:string;allowLarge?:boolean}={}){assertReviewed(root);await localGitRoot(root);return withLease(c,async()=>{await assertRemoteGit(c);await assertManagedIgnoreConsistent(root,c);const effectiveConfig=opts.allowLarge?{...c,sync:{...c.sync,maxSourceFileMB:1024*1024}}:c;const policy=new PathPolicyEngine(root,effectiveConfig),local=await policy.sourceFiles(),remoteSkipped:{path:string;size:number}[]=[],rem=await remoteInventory(effectiveConfig,remoteSkipped),base=readManifest(root),git=await gitState(c,root);let report:Report|undefined;
+export async function sync(c:Config,root:string,direction:'sync'|'pull',opts:{resolve?:string;keepLocal?:string;keepRemote?:string;allowLarge?:boolean;paths?:string[];full?:boolean}={}){assertReviewed(root);await localGitRoot(root);return withLease(c,async()=>{await assertRemoteGit(c);await assertManagedIgnoreConsistent(root,c);const effectiveConfig=opts.allowLarge?{...c,sync:{...c.sync,maxSourceFileMB:1024*1024}}:c;const policy=new PathPolicyEngine(root,effectiveConfig),local=await policy.sourceFiles({paths:opts.paths,full:opts.full}),remoteSkipped:{path:string;size:number}[]=[],rem=await remoteInventory(effectiveConfig,remoteSkipped,{paths:opts.paths,full:opts.full}),base=readManifest(root),git=await gitState(c,root);let report:Report|undefined;
  if(opts.resolve||opts.keepLocal||opts.keepRemote){const id=opts.resolve??opts.keepLocal??opts.keepRemote!;report=readReport(root,id);validateReport(root,report,base,rem,git);}
  const {conflicts,transfer}=computeChanges(local,rem,base,direction);const remoteWins:string[]=[];const initialSkippedLocal=[...policy.skippedLarge];
  // A missing inventory entry may be ignored or oversized, not absent. Check
@@ -81,12 +83,12 @@ export async function sync(c:Config,root:string,direction:'sync'|'pull',opts:{re
  if(report){const old=new Set(report.conflicts.map(x=>x.path));if(conflicts.some(x=>!old.has(x.path)))throw new WdxError('WDX_CONFLICT_STALE','New conflicts appeared');if(opts.keepLocal){await backupRemote(c,report);transfer.push(...report.conflicts.map(x=>x.path).filter(x=>local.has(x)));direction='sync';}else if(opts.keepRemote){backupLocal(root,report);remoteWins.push(...report.conflicts.map(x=>x.path).filter(x=>rem.has(x)));}else{for(const x of report.conflicts){const now=local.get(x.path);if(!now||compare(now,x.local))throw new WdxError('WDX_CONFLICT_UNRESOLVED','Local merge has not changed '+x.path+'; choose an explicit keep strategy if intentional');}transfer.push(...report.conflicts.map(x=>x.path).filter(x=>local.has(x)));direction='sync';}}
  const transferPaths=[...new Set(transfer)],remoteWinPaths=[...new Set(remoteWins)];
  if(transferPaths.length||remoteWinPaths.length){
-  const freshLocal=await policy.sourceFiles(),freshRemote=await remoteInventory(effectiveConfig);
+  const freshLocal=await policy.sourceFiles({paths:[...new Set([...transferPaths,...remoteWinPaths])],full:true}),freshRemote=await remoteInventory(effectiveConfig,[],{paths:[...new Set([...transferPaths,...remoteWinPaths])],full:true});
   for(const p of new Set([...transferPaths,...remoteWinPaths]))if(!compare(freshLocal.get(p)??null,local.get(p)??null)||!compare(freshRemote.get(p)??null,rem.get(p)??null))throw new WdxError('WDX_CONCURRENT_CHANGE','Source changed during sync preparation: '+p);
  }
- await copyFiles(c,root,'pull',remoteWinPaths);await copyFiles(c,root,direction,transferPaths);const skippedLarge=[...initialSkippedLocal.map(x=>({...x,side:'local'})),...remoteSkipped.map(x=>({...x,side:'remote'}))];const afterLocal=await policy.sourceFiles(),afterRemote=await remoteInventory(effectiveConfig);
+ await copyFiles(c,root,'pull',remoteWinPaths);await copyFiles(c,root,direction,transferPaths);const skippedLarge=[...initialSkippedLocal.map(x=>({...x,side:'local'})),...remoteSkipped.map(x=>({...x,side:'remote'}))];const verifyPaths=[...new Set([...transferPaths,...remoteWinPaths])];const afterLocal=new Map(local),afterRemote=new Map(rem);if(verifyPaths.length){const verifiedLocal=await policy.sourceFiles({paths:verifyPaths,full:true}),verifiedRemote=await remoteInventory(effectiveConfig,[],{paths:verifyPaths,full:true});for(const p of verifyPaths){afterLocal.delete(p);afterRemote.delete(p);if(verifiedLocal.has(p))afterLocal.set(p,verifiedLocal.get(p)!);if(verifiedRemote.has(p))afterRemote.set(p,verifiedRemote.get(p)!);}}
  for(const p of new Set([...transferPaths,...remoteWinPaths]))if(!afterLocal.has(p)||!afterRemote.has(p)||!compare(afterLocal.get(p)!,afterRemote.get(p)!))throw new WdxError('WDX_CONCURRENT_CHANGE','Transferred Source did not converge: '+p);
- const files=nextManifestFiles(afterLocal,afterRemote,base);atomicJson(statePath(root),{version:base.version+1,files,localHead:git.localHead,remoteHead:git.remoteHead,lastSync:new Date().toISOString()});return {transferred:transfer.length+remoteWins.length,manifestVersion:base.version+1,skippedLarge};});}
+ const files=opts.paths?{...Object.fromEntries(Object.entries(base.files).filter(([p])=>!opts.paths!.includes(p)&&!PathPolicyEngine.isNeverSource(p))),...nextManifestFiles(afterLocal,afterRemote,{...base,files:Object.fromEntries(Object.entries(base.files).filter(([p])=>opts.paths!.includes(p)))})}:nextManifestFiles(afterLocal,afterRemote,base);atomicJson(statePath(root),{version:base.version+1,files,localHead:git.localHead,remoteHead:git.remoteHead,lastSync:new Date().toISOString()});return {transferred:transfer.length+remoteWins.length,manifestVersion:base.version+1,skippedLarge};});}
 export async function restoreConflict(c:Config,root:string,id:string,side:'local'|'remote'){
  const report=readReport(root,id);
  await localGitRoot(root);

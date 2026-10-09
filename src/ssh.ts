@@ -5,11 +5,12 @@ import * as net from 'node:net';
 import {createHash,randomUUID} from 'node:crypto';
 import {Config,run,shQuote,WdxError,Result,privateDirectory} from './core';
 import {localGitRoot,gitBoundaryScript,assertGitResult} from './git';
+import {PathPolicyEngine} from './policy';
 export async function assertRemoteGit(config:Config,allowMissing=false){const r=await remote(config,'set -e\n'+gitBoundaryScript(allowMissing),[config.remote.project]);assertGitResult(r);return r.stdout;}
 export type Effective={hostname:string;port:string;user:string;identityfile:string[];identityagent:string;certificatefile:string[];identitiesonly:string;proxyjump:string;proxycommand:string};
 const effectiveCache=new Map<string,Promise<Effective>>();
 export function clearEffectiveCache(target:string){effectiveCache.delete(target);}
-export async function effective(target:string):Promise<Effective>{let pending=effectiveCache.get(target);if(!pending){pending=loadEffective(target);effectiveCache.set(target,pending);pending.catch(()=>effectiveCache.delete(target));}return pending;}
+export async function effective(target:string):Promise<Effective>{let pending=effectiveCache.get(target);if(!pending){if(effectiveCache.size>=64)effectiveCache.delete(effectiveCache.keys().next().value!);pending=loadEffective(target);effectiveCache.set(target,pending);pending.catch(()=>effectiveCache.delete(target));}return pending;}
 async function loadEffective(target:string):Promise<Effective>{const r=await run('ssh',['-G',target],{timeout:10000});if(r.code)throw new WdxError('WDX_SSH_CONFIG',r.stderr);const m:Record<string,string[]>={};for(const line of r.stdout.split('\n')){const i=line.indexOf(' ');if(i<0)continue;const k=line.slice(0,i),v=line.slice(i+1).trim();(m[k]??=[]).push(v);}return {hostname:m.hostname?.[0]??target,port:m.port?.[0]??'22',user:m.user?.[0]??os.userInfo().username,identityfile:m.identityfile??[],identityagent:m.identityagent?.[0]??'none',certificatefile:m.certificatefile??[],identitiesonly:m.identitiesonly?.[0]??'no',proxyjump:m.proxyjump?.[0]??'none',proxycommand:m.proxycommand?.[0]??'none'};}
 export function connectionId(e:Effective){return createHash('sha256').update(JSON.stringify(e)).digest('hex').slice(0,24);}
 export function controlPath(e:Effective){const dir=path.join(process.env.WERODEX_STATE_DIR??path.join(os.homedir(),'.local','state','werodex'),'sockets');privateDirectory(path.dirname(dir));privateDirectory(dir);return path.join(dir,connectionId(e)+'.sock');}
@@ -20,16 +21,21 @@ export async function remote(config:Config,script:string,args:string[]=[],timeou
  const d=await import('./daemon');if(!options.existingOnly)await d.ensureDaemon();
  return d.rpc({op:'exec',target:config.remote.target,config,request:{script,args,timeout,maxBytes,requestId:options.requestId??randomUUID(),lane:options.lane??(timeout>120000?'blocking':'control'),existingOnly:options.existingOnly}},timeout+190000);
 }
+export async function remoteAction(config:Config,action:string,payload:any={},options:{existingOnly?:boolean;lane?:'control'|'blocking';timeout?:number;maxBytes?:number;onData?:(kind:'O'|'E',data:Buffer)=>Promise<void>}={}){
+ const d=await import('./daemon');if(!options.existingOnly)await d.ensureDaemon();const timeout=options.timeout??60000;
+ const result=await d.rpc({op:'action',target:config.remote.target,config,request:{script:'',args:[],requestId:randomUUID(),timeout,maxBytes:options.maxBytes??8*1024*1024,lane:options.lane??'control',existingOnly:options.existingOnly,action,payload,root:config.remote.project,policy:PathPolicyEngine.policyData(config)}},timeout+190000,options.onData);
+ if(result.error){const match=/^(WDX_[A-Z_]+):?/.exec(result.error);throw new WdxError(match?.[1]??'WDX_REMOTE',result.error);}
+ return result;
+}
 export function rsyncSsh(sock:string){return 'ssh '+masterClientArgs(sock).map(shQuote).join(' ');}
 export async function gitState(config:Config,localRoot?:string){
  if(localRoot)await localGitRoot(localRoot);
- const snapshot=await remote(config,'set -e\n'+gitBoundaryScript()+'cd "$1"\nhead=$(git rev-parse HEAD 2>/dev/null || true)\ndirty=$(git status --porcelain --untracked-files=all)\nprintf "%s\\n" "$head"\nif [[ -n "$dirty" ]]; then printf "1\\n"; else printf "0\\n"; fi\n',[config.remote.project]);assertGitResult(snapshot);
- const [remoteHead,remoteDirty]=snapshot.stdout.split('\n');
+ const snapshot=(await remoteAction(config,'git.state')).value;const remoteHead=snapshot.head,remoteDirty=snapshot.dirty;
  const local=localRoot?await run('git',['rev-parse','HEAD'],{cwd:localRoot}):undefined;
  const localDirty=localRoot?await run('git',['status','--porcelain','--untracked-files=all'],{cwd:localRoot}):undefined;
  const lh=local?.code===0?local.stdout.trim():null,rh=remoteHead||null;let ancestry:'same'|'local-ancestor'|'remote-ancestor'|'diverged'|'unknown'='unknown';
  if(lh&&rh){if(lh===rh)ancestry='same';else if(localRoot){const a=await run('git',['merge-base','--is-ancestor',lh,rh],{cwd:localRoot});const b=await run('git',['merge-base','--is-ancestor',rh,lh],{cwd:localRoot});if(a.code===0)ancestry='local-ancestor';else if(b.code===0)ancestry='remote-ancestor';else if((await run('git',['cat-file','-e',rh+'^{commit}'],{cwd:localRoot})).code===0)ancestry='diverged';}}
- return {localHead:lh,remoteHead:rh,ancestry,localDirty:!!localDirty?.stdout.trim(),remoteDirty:remoteDirty==='1'};
+ return {localHead:lh,remoteHead:rh,ancestry,localDirty:!!localDirty?.stdout.trim(),remoteDirty:!!remoteDirty};
 }
 
 export async function startPasswordMaster(target:string,password:string){const d=await import('./daemon');await d.ensureDaemon();return d.rpc({op:'unlock',target,password},60000);}

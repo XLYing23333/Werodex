@@ -61,8 +61,8 @@ export async function checkpoint(c:Config,root:string,message:string,paths:strin
   // Identity checks on both sides precede sync or either commit.
   for(const identity of ['GIT_AUTHOR_IDENT','GIT_COMMITTER_IDENT'])assertGitResult(await run('git',['var',identity],{cwd:root}));
   assertGitResult(await remote(c,'set -e\n'+gitBoundaryScript()+'git -C "$1" var GIT_AUTHOR_IDENT >/dev/null\ngit -C "$1" var GIT_COMMITTER_IDENT >/dev/null\n',[c.remote.project]));
-  await sync(c,root,'sync');
-  const local=await new PathPolicyEngine(root,c).sourceFiles(),rem=await remoteInventory(c),expected:CheckpointRecord['expected']={};
+  await sync(c,root,'sync',{paths});
+  const local=await new PathPolicyEngine(root,c).sourceFiles({paths,full:true}),rem=await remoteInventory(c,[],{paths,full:true}),expected:CheckpointRecord['expected']=Object.create(null);
   for(const p of [...new Set(paths)]){
    const l=local.get(p)??null,r=rem.get(p)??null;
    if(JSON.stringify(l)!==JSON.stringify(r))throw new WdxError('WDX_CHECKPOINT_STALE','Source must match on both sides (deletions require explicit reconciliation): '+p);
@@ -75,7 +75,7 @@ export async function checkpoint(c:Config,root:string,message:string,paths:strin
  try{fd=fs.openSync(lock,'wx',0o600);}catch{throw new WdxError('WDX_CHECKPOINT_BUSY','Checkpoint is already being processed');}
  try{
   // Check convergence again even on resume, before creating any new commit.
-  const local=await new PathPolicyEngine(root,c).sourceFiles(),rem=await remoteInventory(c);
+  const local=await new PathPolicyEngine(root,c).sourceFiles({paths:record.paths,full:true}),rem=await remoteInventory(c,[],{paths:record.paths,full:true});
   for(const p of record.paths)for(const now of [local.get(p)??null,rem.get(p)??null])if(JSON.stringify(now)!==JSON.stringify(record.expected[p]))throw new WdxError('WDX_CHECKPOINT_STALE','Source changed since checkpoint preparation: '+p);
   atomicJson(file,record);
   if(!record.local){const r=await run('bash',['-s','--',root,record.message],{input:commitScript(record,path.join(directory,record.id+'.local')),timeout:120000});if(r.stdout.trim())record.local=parseSide(r.stdout,record.paths);assertGitResult(r,'WDX_CHECKPOINT');record.status='partial';atomicJson(file,record);}
@@ -86,7 +86,7 @@ export async function checkpoint(c:Config,root:string,message:string,paths:strin
    const r=await remote(c,script,[c.remote.project,record.message],120000);if(r.stdout.trim())record.remote=parseSide(r.stdout,record.paths);assertGitResult(r,'WDX_CHECKPOINT');atomicJson(file,record);
   }
   if(!record.local||!record.remote)throw new WdxError('WDX_CHECKPOINT','Missing endpoint commit result');
-  const finalLocal=await new PathPolicyEngine(root,c).sourceFiles(),finalRemote=await remoteInventory(c);
+  const finalLocal=await new PathPolicyEngine(root,c).sourceFiles({paths:record.paths,full:true}),finalRemote=await remoteInventory(c,[],{paths:record.paths,full:true});
   for(const p of record.paths)for(const current of [finalLocal.get(p)??null,finalRemote.get(p)??null])if(JSON.stringify(current)!==JSON.stringify(record.expected[p]))throw new WdxError('WDX_CHECKPOINT_STALE','Source changed during checkpoint: '+p);
   record.status='complete';delete record.error;atomicJson(file,record);
   fs.writeFileSync(path.join(root,'.werodex/checkpoint'),(record.remote.head??'')+'\n',{mode:0o600});atomicJson(path.join(root,'.werodex/checkpoint-state.json'),record);

@@ -23,13 +23,14 @@
     "werodex_skills"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && chmod 755 dist/cli.js dist/daemon-cli.js dist/askpass.js",
+    "build": "tsc -p tsconfig.json && cp src/remote-worker.py dist/remote-worker.py && cp src/mcp.mjs dist/mcp.mjs && chmod 755 dist/cli.js dist/daemon-cli.js dist/askpass.js",
     "prepare": "npm run build",
-    "test": "npm run build && node --test tests/*.test.js",
+    "test": "npm run build && node --test --test-concurrency=1 tests/*.test.js",
     "release:check": "npm test && node scripts/release-check.cjs",
     "prepublishOnly": "npm run release:check"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "2.3.1",
     "@types/node": "^22.0.0",
     "typescript": "^5.9.0"
   },
@@ -47,5 +48,9 @@
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.3.1",
+    "zod": "4.6.5"
   }
 }

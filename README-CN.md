@@ -32,7 +32,7 @@ Werodex 不会在远端运行 Codex，不会把模型凭据复制到服务器，
 - rsync
 - Python 3
 
-远端需要 OpenSSH、Git、rsync、tmux、Bash 和 GNU coreutils。请先配置并验证 OpenSSH Host 别名与认证方式。远端项目目录必须已经存在。若尚无独立 Git 仓库，`init` 会在该目录创建 `main` 分支；已有仓库和分支保持原样。两端项目必须是独立 Git 工作区根目录（支持 worktree）；父级仓库会触发 `WDX_GIT_PARENT`，需先在项目目录手动执行 `git init -b main`。
+远端需要 OpenSSH、Git、rsync、tmux、Python 3.10+、Bash 和 GNU coreutils。请先配置并验证 OpenSSH Host 别名与认证方式。远端项目目录必须已经存在。若尚无独立 Git 仓库，`init` 会在该目录创建 `main` 分支；已有仓库和分支保持原样。两端项目必须是独立 Git 工作区根目录（支持 worktree）；父级仓库会触发 `WDX_GIT_PARENT`，需先在项目目录手动执行 `git init -b main`。
 
 ## 安装 CLI 与 Skill
 
@@ -73,7 +73,7 @@ cp -a "$(npm root -g)/werodex/werodex_skills/werodex-init" "$skill_dir/"
 
 `werodex init` 会在**本地项目根目录**创建或更新 `AGENTS.md` 受管区块，保留区块外的原有说明。这是给 Codex 等 Agent 使用的项目级操作规范。`werodex-init` Skill 负责引导首次初始化；初始化后，Agent 应**立即读取新生成的 `AGENTS.md` 区块**，并在后续任务中遵循它。当前对话中新建的文件不应被假定会自动重新载入。
 
-受管区块规定了何时检查目录树、排除数据与本地专用文件、同步源码、运行远端任务、处理冲突和查看有界日志。每个源码里程碑验证完成后，它要求 Agent 按指定路径执行双端 `checkpoint`、刷新 `git-tree`，再写工作日志；发现未提交源码时日志命令会拒绝写入。Werodex CLI 强制执行传输和路径约束；修改哪些代码、如何合并冲突由当前 Agent 或人工判断。`AGENTS.md` 遵循 Agent 正常的指令层级。
+受管区块规定了何时检查目录树、排除数据与本地专用文件、同步源码、运行远端任务、处理冲突和查看有界日志。每个源码里程碑验证完成后，它要求 Agent 按指定路径执行双端 `checkpoint`、刷新 `git-tree`，再写工作日志；`finish` 只处理本阶段命名路径；只读日志无需提交。Werodex CLI 强制执行传输和路径约束；修改哪些代码、如何合并冲突由当前 Agent 或人工判断。`AGENTS.md` 遵循 Agent 正常的指令层级。
 
 ### 给 Agent 的使用流程
 
@@ -112,10 +112,8 @@ werodex logs <job-id>
 每个源码里程碑验证后，提交本次改动的双端 Source，并在本地记录：
 
 ```bash
-werodex checkpoint -m "完成示例功能" -- src/main.py
-werodex git-tree
 # 先在 .werodex/entry.md 写好“修改内容”“收益”“验证结果”和“下一步”。
-werodex log add --file .werodex/entry.md --asset /home/me/demo/outputs/preview.png
+werodex finish -m "完成示例功能" --log .werodex/plan/entry.md --asset /home/me/demo/outputs/preview.png -- src/main.py
 ```
 
 本地产生的图表、截图或视频使用可重复的 `--local-asset PATH`，可与远端 `--asset` 混用；纯本地日志无需连接远端。没有可视化时在条目中说明原因。本地专用文档先执行 `werodex exclude add PATH --reason "local-only: ..."`，再创建文件。运行 `werodex help` 查看完整命令列表。已有工作区可重新运行 `werodex review complete`，刷新生成的 `AGENTS.md` 受管区块。
@@ -159,7 +157,7 @@ Werodex 将文件分为源码、忽略项、大文件、受保护的远端专属
 
 每个源码里程碑完成后，Agent 应验证、通过 `checkpoint -m "说明" -- PATH...` 提交本次命名路径的双端 Source，并运行 `git-tree`。每个已验证的源码里程碑都必须执行双端 checkpoint；本地和远端分别提交命名路径，并记录两个 SHA。完成顺序为验证、双端 checkpoint、git-tree、日志。每次阶段验证、实验结果、功能完成或本地交付完成后，Agent 必须立即撰写包含“修改内容”“收益”“验证结果”和“下一步”的 Markdown，并执行 `log add --file`，不等整个任务结束。已有相关图片、截图、动画或视频时必须附加代表性文件；没有适用可视化时说明原因。每个工作日使用一个 `.werodex/logs/logs-YYYY-MM-DD.md`，按上海时间 04:00 切日，新条目位于顶部。远端 `--asset` 与本地 `--local-asset` 合计最多 5 个附件，每个不超过 32 MB；本地文件复制而非移动，统一存入 `.werodex/assets/<工作日>/` 并记录大小和 SHA-256。图片使用 Markdown 内嵌，MP4/WebM 使用 HTML video 并附文件链接，其他格式保留链接。Agent 应读取保存后的日志并检查媒体展示；预览器不支持视频时验证回退链接并注明限制，聊天中的媒体使用本地绝对路径。
 
-短命令通过本地 daemon 的长期非 PTY 通道交给远端 tmux worker，不再逐条启动 SSH。正常保留两条控制通道，并为传输或交互预留第三条；总通道数最多 3，超额请求排队。分离任务使用远端 `tmux`，本地终端或 daemon 断开后仍会继续。远端任务日志默认每个任务最多 256 MB，已完成任务保留 7 天。`logs` 默认返回有限输出；需要人工排查时可显式使用 `logs --raw`。
+短命令通过本地 daemon 的长期非 PTY 通道交给远端 tmux worker，不再逐条启动 SSH。正常保留两条控制通道，并为传输或交互预留第三条；不同目标共享全局最多 3 条通道，超额请求排队。分离任务使用远端 `tmux`，本地终端或 daemon 断开后仍会继续。远端任务日志实时执行每任务 256 MiB 配额。`logs` 默认返回有限输出；需要人工排查时可显式使用 `logs --raw`。
 
 ## 安全
 
@@ -195,8 +193,12 @@ Werodex 使用 [Apache License 2.0](LICENSE) 发布。
 
 `werodexd` 管理每个有效目标的唯一 SSH Master。CLI 退出或空闲十分钟后，连接与两条 tmux 控制通道仍保留；`wait` 在远端等待，不重复创建 SSH。新配置 `maxChannels` 默认 3，旧配置高于 3 时有效上限压至 3；配置 2 时使用一条控制通道加一条传输通道，配置 1 时串行切换。rsync、fetch、shell 和 attach 只能复用 Master，无法复用时不会回退直连。`status` 展示通道、排队、重连及连接尝试次数。认证失败暂停，网络失败退避；显式 `reconnect` 重置。
 
-`checkpoint -m MESSAGE -- PATH...` 返回 JSON，包含操作 ID、两端 SHA、实际提交路径和跳过状态；没有源码变化时不创建空提交。两端提交不是原子事务，部分成功时使用 `checkpoint --resume ID` 补齐缺失步骤，成功的提交不会被撤销。`log add` 在归档附件前检查全部 Source 的新增、修改、删除和重命名，未提交时返回 `WDX_CHECKPOINT_REQUIRED`。纯本地日志不主动连接远端；缺少健康通道时明确标记远端未验证。
+`checkpoint -m MESSAGE -- PATH...` 返回 JSON，包含操作 ID、两端 SHA、实际提交路径和跳过状态；没有源码变化时不创建空提交。两端提交不是原子事务，部分成功时使用 `checkpoint --resume ID` 补齐缺失步骤，成功的提交不会被撤销。`log add --source PATH` 仅检查显式范围，未提交时返回 `WDX_CHECKPOINT_REQUIRED`。未声明源码范围的只读或实验日志不扫描全项目，也不声称已验证提交。纯本地日志不主动连接远端；缺少健康通道时明确标记远端未验证。
 
 断线后的写请求不得盲目重放；先执行 `reconnect`，再用 `werodex request status ID` 查询已完成、执行中或结果未知状态。控制通道重启不终止独立 tmux 长任务。
 
 所有计划 Markdown 保存到 `.werodex/plan/`。已有工作区运行 `review complete` 创建目录并刷新指令。历史计划先运行 `werodex plan migrate --dry-run -- .werodex/FILE.md...`，检查后去掉 `--dry-run`；仅搬移明确命名的计划，并修正内部相对链接及 `.werodex/` 下的 Markdown 引用，失败回滚。project-tree、git-tree、日志和冲突文档不会被搬移。
+
+原生文件工具、MCP、范围阶段完成、流式日志、容量诊断及升级说明见 [工具工作流](docs/NATIVE_TOOLS.md)。通过 `review complete` 刷新现有工作区，不需重新初始化。
+
+`file read` 默认仅返回受保护或配置为排除的数据元信息；显式 `--preview` 才读取有界片段，凭据路径始终禁止。

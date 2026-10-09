@@ -7,14 +7,15 @@ import {rsyncSsh,remote} from './ssh';
 import {withLease,withTransferLease} from './daemon';
 
 export type FetchedAsset={destination:string;size:number;hash:string;remotePath:string};
-export async function fetchArtifact(c:Config,root:string,requested:string,destination?:string,allowLarge=false):Promise<FetchedAsset>{
+export async function fetchArtifact(c:Config,root:string,requested:string,destination?:string,allowLarge=false,maxArchiveBytes?:number):Promise<FetchedAsset>{
  return withLease(c,async()=>{
-  const rp=PathPolicyEngine.safeRemotePath(c.remote.project,requested);
+  PathPolicyEngine.assertNotCredential(requested);const rp=PathPolicyEngine.safeRemotePath(c.remote.project,requested);
   if(rp.split('/').some(x=>['datasets','data','pretrained'].includes(x)))throw new WdxError('WDX_PATH','Dataset and pretrained bulk fetch is forbidden');
   const check=await remote(c,'set -e; p=$(realpath -e -- "$1"); case "$p" in "$2"/*) ;; *) exit 5;; esac; test "$p" = "$1"; test -f "$p"; stat -c%s -- "$p"; sha256sum -- "$p"',[rp,c.remote.project]);
   if(check.code)throw new WdxError('WDX_PATH','Artifact must be a regular file inside the remote project without symbolic links');
   const [sizeLine,hashLine]=check.stdout.trim().split('\n'),size=Number(sizeLine),hash=hashLine?.split(' ')[0];
   if(!Number.isSafeInteger(size)||size<0||!/^[a-f0-9]{64}$/.test(hash??''))throw new WdxError('WDX_FETCH','Invalid remote artifact metadata');
+  if(maxArchiveBytes!==undefined&&size>maxArchiveBytes)throw new WdxError('WDX_STORAGE_LIMIT','Attachment would exceed workspace state quota');
   const relative=path.posix.relative(c.remote.project,rp),policy=await new PathPolicyEngine(root,c).classify(relative,size,true);
   if(policy.kind==='IGNORED')throw new WdxError('WDX_PATH','Artifact excluded by path policy');
   if(size>32*1024*1024&&!allowLarge)throw new WdxError('WDX_LARGE_FILE',`Artifact is ${size} bytes; maximum is 32 MB`);

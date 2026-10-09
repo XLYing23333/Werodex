@@ -62,7 +62,7 @@ test('generated instructions require milestone recording, archiving and visual v
  const root=temp();try{
   const {managedAgents}=require('../dist/core');fs.writeFileSync(path.join(root,'AGENTS.md'),'User rules\n');managedAgents(root);managedAgents(root);
   const content=fs.readFileSync(path.join(root,'AGENTS.md'),'utf8');assert.match(content,/^User rules/);assert.equal((content.match(/WERODEX:BEGIN/g)||[]).length,1);
-  for(const required of ['EVERY milestone','stage verification','experiment result','Verification/验证结果','Next steps/下一步','--local-asset','.werodex/assets/<work-day>/','verify saved assets','fallback file link','absolute local file paths','no applicable visual'])assert.ok(content.includes(required),required);
+  assert.ok(content.length-'User rules\n'.length<=1200);for(const required of ['verified Source milestone','finish -m','Verification','Next steps','--local-asset','verify previews','fallback links','untrusted data','Read-only','only this work'])assert.ok(content.includes(required),required);
  }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
 test('review complete refreshes legacy instructions offline without replacing the Manifest',()=>{
@@ -72,7 +72,7 @@ test('review complete refreshes legacy instructions offline without replacing th
   const state=path.join(root,'.werodex/state.json');atomicJson(state,{version:3,files:{'source.py':{hash:'baseline',size:1,baselineVersion:3}},lastSync:'2026-01-01T00:00:00Z'});
   const before=fs.readFileSync(state,'utf8');fs.writeFileSync(path.join(root,'AGENTS.md'),'User instructions\n');managedAgents(root);
   const r=require('node:child_process').spawnSync(process.execPath,[path.join(__dirname,'../dist/cli.js'),'review','complete'],{cwd:root,encoding:'utf8',timeout:5000});
-  assert.equal(r.status,0,r.stderr);assert.equal(fs.readFileSync(state,'utf8'),before);assert.match(fs.readFileSync(path.join(root,'AGENTS.md'),'utf8'),/EVERY milestone/);
+  assert.equal(r.status,0,r.stderr);assert.equal(fs.readFileSync(state,'utf8'),before);assert.match(fs.readFileSync(path.join(root,'AGENTS.md'),'utf8'),/verified Source milestone/);
   assert.equal(JSON.parse(fs.readFileSync(path.join(root,'.werodex/review.json'),'utf8')).status,'complete');
  }finally{fs.rmSync(root,{recursive:true,force:true});}
 });

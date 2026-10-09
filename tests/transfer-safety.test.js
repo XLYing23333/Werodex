@@ -17,7 +17,7 @@ core.run=async(file,args,opts)=>{if(file==='ssh'){
  }if(file==='rsync'){transfers++;throw Error('Unexpected rsync before policy approval');}return realRun(file,args,opts);};
 daemon.withLease=async(c,fn)=>fn();
 daemon.withTransferLease=async(c,f)=>f('/tmp/werodex-fixture.sock');daemon.ensureDaemon=async()=>{};daemon.existingConnection=async()=>null;
-daemon.rpc=async q=>{if(q.op==='exec'){const r=q.request;return realRun('bash',['-s','--',...r.args],{input:r.script,timeout:r.timeout,maxBytes:r.maxBytes});}return {};};
+daemon.rpc=async q=>{if(q.op==='action')return require('./native-fixture.cjs')(q.request);if(q.op==='exec'){const r=q.request;return realRun('bash',['-s','--',...r.args],{input:r.script,timeout:r.timeout,maxBytes:r.maxBytes});}return {};};
 // Execute the production remote scripts in an isolated second local repository.
 ssh.remote=async(c,script,args=[],timeout=60000,maxBytes)=>realRun('bash',['-s','--',...args],{input:script,timeout,maxBytes});
 const {sync}=require('../dist/sync');

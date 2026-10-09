@@ -1,15 +1,17 @@
+import {invalidateUsage,checkStorageBudget,stateUsage} from './storage';
+import {count} from './diagnostics';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {createHash} from 'node:crypto';
-import {Config,protectedNames,WdxError,run,shQuote} from './core';
+import {Config,protectedNames,WdxError,run,shQuote,privateDirectory} from './core';
 import {localGitRoot,gitBoundaryScript} from './git';
 export type PathClass='PROTECTED'|'IGNORED'|'LARGE'|'ARTIFACT'|'SOURCE';
 export type Decision={kind:PathClass;reason:string};
 export const ruleFileNames=['AGENTS.md','.gitignore','.ignore','.dockerignore','.rgignore'];
-const fixedExclude=[...ruleFileNames,'.werodex','.git','node_modules','.env','.env.local','.ssh','.aws','.gnupg','.npmrc','.pypirc','.netrc','id_rsa','id_ecdsa','id_ed25519'];
+export const fixedExclude=[...ruleFileNames,'.werodex','.git','node_modules','.env','.env.local','.ssh','.aws','.gnupg','.npmrc','.pypirc','.netrc','id_rsa','id_ecdsa','id_ed25519'];
 export const sourceExtensions=['.py','.pyi','.c','.h','.cc','.cpp','.cxx','.hpp','.hxx','.html','.css','.js','.jsx','.mjs','.cjs','.ts','.tsx','.go','.rs','.java','.sh','.bash','.md','.mdx','.yaml','.yml','.toml','.xml','.sql'];
 export function isSourceExtension(relative:string){return sourceExtensions.some(ext=>relative.toLowerCase().endsWith(ext));}
-function norm(relative:string){const p=relative.replaceAll('\\','/').replace(/^\.\//,''); if(!p||p.startsWith('/')||p.split('/').includes('..')||p.includes('\0'))throw new WdxError('WDX_PATH','Unsafe relative path');return p;}
+function norm(relative:string){const p=relative.replaceAll('\\','/').replace(/^\.\//,''); if(!p||p.length>4096||p.startsWith('/')||p.split('/').includes('..')||p.includes('\0'))throw new WdxError('WDX_PATH','Unsafe relative path');return p;}
 export class PathPolicyEngine {
  private gitCheck?:Promise<string|undefined>;
  private checkGit(){return this.gitCheck??=localGitRoot(this.root,false,'WDX_GITIGNORE');}
@@ -23,8 +25,28 @@ export class PathPolicyEngine {
    if(size>this.config.sync.maxSourceFileMB*1024*1024&&!isSourceExtension(p))return {kind:'LARGE',reason:'source size limit'};
    return {kind:artifact?'ARTIFACT':'SOURCE',reason:'source'};
  }
- async sourceFiles():Promise<Map<string,{size:number;hash:string}>>{this.gitCheck=undefined;await this.checkGit();this.skippedLarge=[];const out=new Map<string,{size:number;hash:string}>();
-   const walk=async(dir:string)=>{for(const e of fs.readdirSync(path.join(this.root,dir),{withFileTypes:true})){const rel=path.posix.join(dir,e.name),full=path.join(this.root,rel); if(e.isSymbolicLink())continue; const stat=fs.statSync(full); const d=await this.classify(rel,e.isDirectory()?0:stat.size); if(d.kind==='LARGE')this.skippedLarge.push({path:rel,size:stat.size});if(d.kind!=='SOURCE')continue; if(e.isDirectory())await walk(rel); else if(e.isFile()){const hash=createHash('sha256');for await(const chunk of fs.createReadStream(full))hash.update(chunk);out.set(rel,{size:stat.size,hash:hash.digest('hex')});}}}; await walk('');return out;
+ static protectedData(relative:string,config:Config){return relative.split('/').some(p=>protectedNames.includes(p)||p==='node_modules')||(config.sync.exclude??[]).some(p=>relative===p||relative.startsWith(p+'/'));}
+ static policyData(config:Config){return {protectedNames,fixedExclude,sourceExtensions,exclude:config.sync.exclude??[],maxBytes:Math.floor(config.sync.maxSourceFileMB*1024*1024)};}
+ static assertNotCredential(relative:string){if(relative.replaceAll('\\','/').split('/').some(x=>['.git','.env','.ssh','.aws','.gnupg','.npmrc','.pypirc','.netrc','id_rsa','id_ecdsa','id_ed25519'].includes(x)||x.startsWith('.env.')))throw new WdxError('WDX_PATH','Credential path is not available as content or an attachment');}
+ async sourceFiles(options:{paths?:string[];full?:boolean;hash?:boolean}={}):Promise<Map<string,{size:number;hash:string}>>{
+  count('scans');this.gitCheck=undefined;await this.checkGit();this.skippedLarge=[];const deadline=Date.now()+120000;
+  let names=options.paths;
+  if(!names){const listed=await run('git',['ls-files','-z','--cached','--others','--exclude-standard'],{cwd:this.root});if(listed.code)throw new WdxError('WDX_GITIGNORE',listed.stderr);names=[...new Set(listed.stdout.split('\0').filter(Boolean))];}
+  const candidates:{p:string;size:number;token:string}[]=[];
+  for(const input of names){const p=norm(input);if(PathPolicyEngine.isNeverSource(p)||(this.config.sync.exclude??[]).some(x=>p===x||p.startsWith(x+'/')))continue;
+   try{PathPolicyEngine.assertSafeTransferPath(this.root,p);const st=fs.statSync(path.join(this.root,p),{bigint:true});if(!st.isFile())continue;if(st.size>BigInt(Math.floor(this.config.sync.maxSourceFileMB*1024*1024))&&!isSourceExtension(p)){this.skippedLarge.push({path:p,size:Number(st.size)});continue;}candidates.push({p,size:Number(st.size),token:[st.dev,st.ino,st.size,st.mtimeNs,st.ctimeNs].join(':')});}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT'||(e instanceof WdxError&&e.code==='WDX_PATH'))continue;throw e;}
+  }
+  const ignored=new Set<string>();if(candidates.length){const result=await run('git',['check-ignore','--no-index','--stdin','-z'],{cwd:this.root,input:candidates.map(x=>x.p).join('\0')+'\0'});if(result.code>1)throw new WdxError('WDX_GITIGNORE',result.stderr);for(const p of result.stdout.split('\0').filter(Boolean))ignored.add(p);}
+  if(options.hash===false)return new Map(candidates.filter(item=>!ignored.has(item.p)).map(item=>[item.p,{size:item.size,hash:''}]));
+  const cacheDir=privateDirectory(path.join(privateDirectory(path.join(this.root,'.werodex')),'cache'));if(!fs.lstatSync(cacheDir).isDirectory()||fs.lstatSync(cacheDir).isSymbolicLink())throw new WdxError('WDX_PATH','Unsafe index cache directory');
+  const buckets=new Map<string,Record<string,{token:string;hash:string}>>(),changed=new Set<string>(),out=new Map<string,{size:number;hash:string}>();
+  count('filesScanned',candidates.length);let cacheBytes=0;for(const item of candidates){if(ignored.has(item.p))continue;const key=createHash('sha256').update(item.p).digest('hex').slice(0,2);let bucket=buckets.get(key);if(!bucket){try{const file=path.join(cacheDir,key+'.json');const bytes=fs.lstatSync(file).size;if(fs.lstatSync(file).isFile()&&bytes<=1024*1024&&cacheBytes+bytes<=8*1024*1024){cacheBytes+=bytes;bucket=JSON.parse(fs.readFileSync(file,'utf8'));}}catch{}bucket=Object.assign(Object.create(null),bucket??{});buckets.set(key,bucket!);}
+   let digest=bucket![item.p]?.token===item.token&&!options.full&&/^[a-f0-9]{64}$/.test(bucket![item.p].hash)?bucket![item.p].hash:undefined;
+   if(digest)count('hashCacheHits');if(!digest){count('filesHashed');count('bytesHashed',item.size);const hash=createHash('sha256');let seen=0;for await(const chunk of fs.createReadStream(path.join(this.root,item.p))){seen+=chunk.length;if(seen>item.size)throw new WdxError('WDX_CONCURRENT_CHANGE','Source grew during hashing');if(Date.now()>deadline)throw new WdxError('WDX_TIMEOUT','Source hash deadline exceeded');hash.update(chunk);}const current=fs.statSync(path.join(this.root,item.p),{bigint:true});if(seen!==item.size||[current.dev,current.ino,current.size,current.mtimeNs,current.ctimeNs].join(':')!==item.token)throw new WdxError('WDX_CONCURRENT_CHANGE','Source changed during hashing');digest=hash.digest('hex');bucket![item.p]={token:item.token,hash:digest};changed.add(key);}
+   out.set(item.p,{size:item.size,hash:digest});
+  }
+  if(changed.size)invalidateUsage(this.root);for(const key of changed){const bucket=buckets.get(key)!;const entries=Object.entries(bucket).slice(-4096);const file=path.join(cacheDir,key+'.json'),tmp=file+'.'+process.pid+'.tmp';fs.writeFileSync(tmp,JSON.stringify(Object.fromEntries(entries)),{mode:0o600});fs.renameSync(tmp,file);}
+  return out;
  }
  async assertTransferAllowed(files:string[]){
   await localGitRoot(this.root);

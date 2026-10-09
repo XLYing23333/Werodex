@@ -10,7 +10,7 @@ const realRun=core.run;let fixtureBase,transferred=[];
 // Production shell scripts and real rsync, restricted to two disposable directories.
 daemon.withLease=async(c,f)=>f();
 daemon.withTransferLease=async(c,f)=>f('/tmp/werodex-fixture.sock');daemon.ensureDaemon=async()=>{};daemon.existingConnection=async()=>null;
-daemon.rpc=async q=>{if(q.op==='exec'){const r=q.request;return realRun('bash',['-s','--',...r.args],{input:r.script,timeout:r.timeout,maxBytes:r.maxBytes});}return {};};
+daemon.rpc=async q=>{if(q.op==='action')return require('./native-fixture.cjs')(q.request);if(q.op==='exec'){const r=q.request;return realRun('bash',['-s','--',...r.args],{input:r.script,timeout:r.timeout,maxBytes:r.maxBytes});}return {};};
 ssh.remote=async(c,script,args=[],timeout=60000,maxBytes)=>realRun('bash',['-s','--',...args],{input:script,timeout,maxBytes});
 ssh.effective=async()=>({});ssh.controlPath=()=>'/tmp/werodex-unused-fixture.sock';
 core.run=async(file,args,options)=>{

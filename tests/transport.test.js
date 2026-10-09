@@ -39,7 +39,7 @@ test('timeouts and output limits terminate requests; disconnected writes are rec
   const requestId=crypto.randomUUID(),counter=path.join(f.home,'counter');
   const request=remote(f.c,'printf x >> "$1"; sleep 1; printf finished',[counter],5000,1024,{lane:'blocking',requestId});const failed=assert.rejects(request,{code:'WDX_REQUEST_UNKNOWN'});
   await until(()=>fs.existsSync(counter));const inProgress=await rpc({op:'request-status',target:'fixture',config:f.c,requestId});assert.equal(inProgress.state,'running');assert.equal(inProgress.remoteChecked,true);const socket=ssh.controlPath(await ssh.effective('fixture'));await core.run('ssh',['-S',socket,'-O','exit','fixture']);await failed;
-  await rpc({op:'reconnect',target:'fixture',config:f.c});const recovered=await rpc({op:'request-status',target:'fixture',config:f.c,requestId});assert.equal(recovered.state,'completed');assert.equal(recovered.stdout,'finished');assert.equal(fs.readFileSync(counter,'utf8'),'x');
+  await rpc({op:'reconnect',target:'fixture',config:f.c});let recovered;await until(async()=>{recovered=await rpc({op:'request-status',target:'fixture',config:f.c,requestId});return recovered.state==='completed';});assert.equal(recovered.state,'completed');assert.equal(recovered.stdout,'finished');assert.equal(fs.readFileSync(counter,'utf8'),'x');
   const job=await startJob(f.c,['bash','-c','sleep 1; echo survived']);const daemonPid=(await rpc({op:'ping'})).pid;process.kill(daemonPid,'SIGTERM');await until(()=>!fs.existsSync(daemon.socketPath()));await ensureDaemon();assert.equal((await waitJob(f.c,job,5)).status,'completed');assert.match(await logs(f.c,job),/survived/);
  }finally{await f.cleanup();}
 });
@@ -78,6 +78,6 @@ test('legacy daemon protocol upgrades without losing existing tmux jobs',async()
   // Simulate the old newline-JSON IPC protocol and its managed script identity.
   const code=`const net=require('node:net'),fs=require('node:fs');const socket=${JSON.stringify(daemon.socketPath())};const server=net.createServer(s=>{let data='';s.on('data',b=>{data+=b.toString();if(data.includes('\\n'))s.end(JSON.stringify({ok:'pong'})+'\\n');});});server.listen(socket,()=>fs.chmodSync(socket,0o600));process.on('SIGTERM',()=>server.close(()=>{try{fs.unlinkSync(socket);}catch{}process.exit(0);}));`;
   legacy=require('node:child_process').spawn(process.execPath,['-e',code,path.resolve(__dirname,'../dist/daemon-cli.js')],{stdio:'ignore'});await until(()=>fs.existsSync(daemon.socketPath()));
-  await ensureDaemon();assert.equal((await rpc({op:'ping'})).version,2);assert.equal((await waitJob(f.c,job,5)).status,'completed');assert.match(await logs(f.c,job),/legacy-survived/);
+  await ensureDaemon();assert.equal((await rpc({op:'ping'})).version,3);assert.equal((await waitJob(f.c,job,5)).status,'completed');assert.match(await logs(f.c,job),/legacy-survived/);
  }finally{legacy?.kill('SIGTERM');await f.cleanup();}
 });
