@@ -9,6 +9,8 @@ const core=require('../dist/core'),ssh=require('../dist/ssh'),daemon=require('..
 const realRun=core.run;let fixtureBase,transferred=[];
 // Production shell scripts and real rsync, restricted to two disposable directories.
 daemon.withLease=async(c,f)=>f();
+daemon.withTransferLease=async(c,f)=>f('/tmp/werodex-fixture.sock');daemon.ensureDaemon=async()=>{};daemon.existingConnection=async()=>null;
+daemon.rpc=async q=>{if(q.op==='exec'){const r=q.request;return realRun('bash',['-s','--',...r.args],{input:r.script,timeout:r.timeout,maxBytes:r.maxBytes});}return {};};
 ssh.remote=async(c,script,args=[],timeout=60000,maxBytes)=>realRun('bash',['-s','--',...args],{input:script,timeout,maxBytes});
 ssh.effective=async()=>({});ssh.controlPath=()=>'/tmp/werodex-unused-fixture.sock';
 core.run=async(file,args,options)=>{
@@ -91,9 +93,9 @@ function entry(local){const file=path.join(local,'.werodex/entry.md');fs.writeFi
 const now=new Date('2026-09-29T20:00:00Z');
 test('real remote fetch and local copy produce mixed media embeds and escaped relative links',async()=>{
  const {base,local,remote,c}=setup();try{
-  fs.mkdirSync(path.join(remote,'outputs'));const remoteImage=path.join(remote,'outputs','plot [a](b)#.svg'),localVideo=path.join(local,'clip "a".webm'),localOther=path.join(local,'<report>.txt');
+  fs.mkdirSync(path.join(remote,'outputs'));const remoteImage=path.join(remote,'outputs','plot [a](b)#.svg'),localVideo=path.join(local,'.werodex','clip "a".webm'),localOther=path.join(local,'.werodex','<report>.txt');
   fs.writeFileSync(remoteImage,'<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><rect width="20" height="20" fill="blue"/></svg>');fs.writeFileSync(localVideo,'video fixture');fs.writeFileSync(localOther,'text');
-  const result=await addLog(c,local,entry(local),[remoteImage],now,{localAssets:[path.basename(localVideo),localOther]});const content=fs.readFileSync(result.log,'utf8');
+  const result=await addLog(c,local,entry(local),[remoteImage],now,{localAssets:[path.relative(local,localVideo),localOther]});const content=fs.readFileSync(result.log,'utf8');
   assert.equal(result.assets.length,3);assert.match(content,/!\[plot \\\[a\\\]/);assert.match(content,/<video controls preload="metadata" src="\.\.\/assets\/2026-09-30\//);assert.match(content,/%5Ba%5D%28b%29%23.svg/);assert.match(content,/&lt;report&gt;/);assert.match(content,/%22a%22.webm/);
   for(const asset of result.assets){assert.ok(asset.path.startsWith(path.join(local,'.werodex/assets/2026-09-30/')));assert.equal(crypto.createHash('sha256').update(fs.readFileSync(asset.path)).digest('hex'),asset.hash);assert.ok(content.includes(asset.hash));}
   for(const match of content.matchAll(/\]\((\.\.\/assets\/[^)]+)\)|src="([^"]+)"/g)){const relative=decodeURIComponent(match[1]??match[2]);assert.ok(fs.existsSync(path.resolve(path.dirname(result.log),relative)));}
@@ -102,15 +104,15 @@ test('real remote fetch and local copy produce mixed media embeds and escaped re
 });
 test('same-name local and remote assets remain distinct and all attachments roll back on failure',async()=>{
  const {base,local,remote,c}=setup();try{
-  fs.mkdirSync(path.join(remote,'outputs'));const remoteImage=path.join(remote,'outputs/preview.png'),localImage=path.join(local,'preview.png');fs.writeFileSync(remoteImage,'remote');fs.writeFileSync(localImage,'local');
+  fs.mkdirSync(path.join(remote,'outputs'));const remoteImage=path.join(remote,'outputs/preview.png'),localImage=path.join(local,'.werodex','preview.png');fs.writeFileSync(remoteImage,'remote');fs.writeFileSync(localImage,'local');
   const file=entry(local),result=await addLog(c,local,file,[remoteImage],now,{localAssets:[localImage]});assert.notEqual(result.assets[0].path,result.assets[1].path);
   const old=fs.readFileSync(result.log,'utf8'),dir=path.dirname(result.assets[0].path),before=fs.readdirSync(dir);
   await assert.rejects(()=>addLog(c,local,file,[remoteImage],now,{localAssets:[localImage,'missing.png']}),{code:'ENOENT'});
   assert.equal(fs.readFileSync(result.log,'utf8'),old);assert.deepEqual(fs.readdirSync(dir),before);assert.ok(!fs.existsSync(result.log+'.lock'));
   await assert.rejects(()=>addLog(c,local,file,[remoteImage],now,{localAssets:Array(5).fill(localImage)}),{code:'WDX_LOG'});
-  const huge=path.join(local,'huge.mp4');const fd=fs.openSync(huge,'w');fs.ftruncateSync(fd,32*1024*1024+1);fs.closeSync(fd);
+  const huge=path.join(local,'.werodex','huge.mp4');const fd=fs.openSync(huge,'w');fs.ftruncateSync(fd,32*1024*1024+1);fs.closeSync(fd);
   await assert.rejects(()=>addLog(c,local,file,[],now,{localAssets:[localImage,huge]}),{code:'WDX_LARGE_FILE'});
-  fs.symlinkSync(localImage,path.join(local,'link.png'));await assert.rejects(()=>addLog(c,local,file,[],now,{localAssets:['link.png']}),{code:'WDX_PATH'});
+  fs.symlinkSync(localImage,path.join(local,'.werodex','link.png'));await assert.rejects(()=>addLog(c,local,file,[],now,{localAssets:['.werodex/link.png']}),{code:'WDX_PATH'});
   await assert.rejects(()=>addLog(c,local,file,[],now,{localAssets:[local]}),{code:'WDX_LOG'});
   assert.equal(fs.readFileSync(result.log,'utf8'),old);assert.deepEqual(fs.readdirSync(dir),before);
  }finally{fs.rmSync(base,{recursive:true,force:true});}

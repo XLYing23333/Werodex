@@ -5,7 +5,7 @@ import {Config,atomicJson,statePath,WdxError,run,shQuote} from './core';
 import {PathPolicyEngine} from './policy';
 import {remote,effective,controlPath,rsyncSsh,gitState,assertRemoteGit} from './ssh';
 import {localGitRoot,gitBoundaryScript,assertGitResult} from './git';
-import {withLease} from './daemon';
+import {withLease,withTransferLease} from './daemon';
 import {assertReviewed,assertManagedIgnoreConsistent} from './review';
 export type Entry={size:number;hash:string};
 export type Manifest={version:number;files:Record<string,Entry & {baselineVersion:number}>;localHead:string|null;remoteHead:string|null;lastSync:string};
@@ -35,12 +35,13 @@ async function copyFiles(c:Config,root:string,direction:'sync'|'pull',files:stri
  for(const p of files)script+=`p=${shQuote(p)}\nfull="$project/$p"\n[[ "$(realpath -m -- "$full")" = "$full" ]] || { echo "Remote transfer path resolves through a symlink: $p" >&2; exit 9; }\n[[ ! -e "$full" || -f "$full" ]] || { echo "Remote transfer destination is not a regular file: $p" >&2; exit 9; }\n`;
  const check=await remote(c,script,[c.remote.project]);
  assertGitResult(check,'WDX_PATH');
- const sock=controlPath(await effective(c.remote.target)),base=c.remote.target+':'+c.remote.project+'/';
+ await withTransferLease(c,async sock=>{
+ const base=c.remote.target+':'+c.remote.project+'/';
  const args=['-s','-a','--no-links','--no-devices','--no-specials','--no-perms','--from0','--files-from=-','-e',rsyncSsh(sock),'--'];
  if(direction==='sync')args.push(root+'/',base);else args.push(base,root+'/');
  const r=await run('rsync',args,{input:files.join('\0')+'\0',timeout:180000,maxBytes:2*1024*1024});
- if(r.stderr.includes('Master refused session request'))throw new WdxError('WDX_SSH_MASTER','SSH Master refused rsync channel');
  if(r.code)throw new WdxError('WDX_RSYNC',r.stderr||r.stdout);
+ });
 }
 export function computeChanges(local:Map<string,Entry>,rem:Map<string,Entry>,base:Manifest,direction:'sync'|'pull'){const paths=new Set([...local.keys(),...rem.keys()]);const conflicts:Conflict[]=[];const transfer:string[]=[];for(const p of paths){const l=local.get(p)??null,r=rem.get(p)??null,b=base.files[p]??null;if(compare(l,r))continue;const lc=!compare(l,b),rc=!compare(r,b);if(l&&r&&lc&&rc){conflicts.push({path:p,base:b,local:l,remote:r});continue;}if(direction==='sync'&&l&&(lc||!r))transfer.push(p);if(direction==='pull'&&r&&(rc||!l))transfer.push(p);}return {conflicts,transfer};}
 function createReport(root:string,direction:'sync'|'pull',conflicts:Conflict[],baseline:Manifest,git:Report['git']){const id=randomUUID(),report:Report={id,created:new Date().toISOString(),manifestVersion:baseline.version,direction,conflicts,git,baseline};atomicJson(reportFile(root,id),report);return report;}

@@ -5,6 +5,7 @@ import {Config,privateDirectory,WdxError} from './core';
 import {fetchArtifact} from './artifacts';
 import {remote} from './ssh';
 import {localGitRoot,gitBoundaryScript,assertGitResult} from './git';
+import {checkMilestone} from './milestone';
 
 function shanghaiParts(now:Date){
  const parts=new Intl.DateTimeFormat('en-US',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).formatToParts(now);
@@ -56,6 +57,7 @@ export async function addLog(c:Config,root:string,entryFile:string,assetPaths:st
  const stat=fs.lstatSync(entryFile);if(!stat.isFile()||stat.size<1||stat.size>64*1024)throw new WdxError('WDX_LOG','Entry must be a regular Markdown file of at most 64 KiB');
  const entry=fs.readFileSync(entryFile,'utf8').trim();
  if(!entry||!/(?:修改内容|Changes)/i.test(entry)||!/(?:收益|Benefits)/i.test(entry))throw new WdxError('WDX_LOG','Entry needs modification and benefit sections');
+ const verification=await checkMilestone(c,root);
  const day=workDay(now),base=privateDirectory(path.join(root,'.werodex')),logs=privateDirectory(path.join(base,'logs')),assets=privateDirectory(path.join(base,'assets')),assetDir=privateDirectory(path.join(assets,day));
  const file=path.join(logs,`logs-${day}.md`),lock=file+'.lock',created:JournalAsset[]=[];
  let fd:number;
@@ -75,9 +77,11 @@ export async function addLog(c:Config,root:string,entryFile:string,assetPaths:st
   const header=`# Werodex 工作日志 · ${day}\n\n`;
   if(old&&!old.startsWith(header))throw new WdxError('WDX_LOG','Daily log header is invalid');
   const links=created.length?'\n### 可视化与输出\n\n'+created.map(a=>assetMarkdown(logs,a)).join('\n\n')+'\n':'';
-  const block=`## ${stamp(now)}\n\n${entry}\n${links}\n---\n\n`;
+  const commitCheck=verification.remote==='verified'?'Local and remote Source commit checks passed':'Local Source commit check passed; remote UNVERIFIED: '+verification.reason;
+  let checkpointHeads='';try{const checkpointFile=path.join(base,'checkpoint-state.json');if(fs.lstatSync(checkpointFile).isFile()){const saved=JSON.parse(fs.readFileSync(checkpointFile,'utf8'));if(saved.workspaceId===c.workspaceId&&saved.status==='complete')checkpointHeads=`\n\nRecorded checkpoint: ${saved.id} · local ${saved.local?.head??'(no commits)'} · remote ${saved.remote?.head??'(no commits)'}`;}}catch{}
+  const block=`## ${stamp(now)}\n\n${entry}\n\n### Git checkpoint verification\n\n${commitCheck}\n\nLocal HEAD: ${verification.localHead??'(no commits)'} · Remote HEAD: ${verification.remote==='verified'?(verification.remoteHead??'(no commits)'):'UNVERIFIED'}${checkpointHeads}\n${links}\n---\n\n`;
   atomicText(file,header+block+(old?old.slice(header.length):''));
-  return {log:file,assets:created.map(a=>({path:a.destination,size:a.size,hash:a.hash}))};
+  return {log:file,verification,assets:created.map(a=>({path:a.destination,size:a.size,hash:a.hash}))};
  }catch(e){for(const asset of created)fs.rmSync(asset.destination,{force:true});throw e;}
  finally{fs.closeSync(fd);fs.rmSync(lock,{force:true});}
 }

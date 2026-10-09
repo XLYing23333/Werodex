@@ -3,8 +3,8 @@ import * as path from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
 import {Config,privateDirectory,run,shQuote,WdxError} from './core';
 import {PathPolicyEngine} from './policy';
-import {effective,controlPath,remote} from './ssh';
-import {withLease} from './daemon';
+import {rsyncSsh,remote} from './ssh';
+import {withLease,withTransferLease} from './daemon';
 
 export type FetchedAsset={destination:string;size:number;hash:string;remotePath:string};
 export async function fetchArtifact(c:Config,root:string,requested:string,destination?:string,allowLarge=false):Promise<FetchedAsset>{
@@ -29,8 +29,7 @@ export async function fetchArtifact(c:Config,root:string,requested:string,destin
   }
   const tmp=dst+'.'+randomUUID()+'.part';
   try{
-   const e=await effective(c.remote.target);
-   const r=await run('rsync',['-s','-a','-e',`ssh -o ControlMaster=auto -o ControlPath=${shQuote(controlPath(e))}`,'--',c.remote.target+':'+rp,tmp],{timeout:180000});
+   const r=await withTransferLease(c,sock=>run('rsync',['-s','-a','-e',rsyncSsh(sock),'--',c.remote.target+':'+rp,tmp],{timeout:180000}));
    if(r.stderr.includes('Master refused session request'))throw new WdxError('WDX_SSH_MASTER','SSH Master refused fetch channel');
    if(r.code)throw new WdxError('WDX_FETCH',r.stderr||r.stdout);
    const stat=fs.lstatSync(tmp);if(!stat.isFile()||stat.size!==size)throw new WdxError('WDX_FETCH','Artifact changed during download or is not a regular file');

@@ -73,7 +73,7 @@ Both methods install to `$CODEX_HOME/skills/werodex-init`, or `~/.codex/skills/w
 
 `werodex init` creates or updates a managed block in the **local project root** `AGENTS.md`, preserving instructions outside that block. This is the main project-specific operating guide for Codex and other agents. The `werodex-init` Skill guides first setup; after initialization, the agent should **read the new `AGENTS.md` block immediately** and follow it for later tasks in that workspace. A newly created file should not be assumed to appear automatically in an already-running agent conversation.
 
-The block tells the agent when to inspect the project tree, exclude datasets and local-only files, sync Source, run remote jobs, handle conflicts, and use bounded logs. After a feature is verified, it directs the agent to commit the named remote Source paths with `checkpoint`, refresh `git-tree`, and write a local work log. Werodex enforces transfer and path rules in the CLI; the agent decides what code to change and how to resolve conflicts. `AGENTS.md` supplies workspace instructions within the agent's normal instruction hierarchy.
+The block tells the agent when to inspect the project tree, exclude datasets and local-only files, sync Source, run remote jobs, handle conflicts, and use bounded logs. After every Source milestone is verified, it directs the agent to checkpoint named paths in both repositories, refresh `git-tree`, and write a work log. The log command refuses to save while eligible Source remains uncommitted. Werodex enforces transfer and path rules in the CLI; the agent decides what code to change and how to resolve conflicts. `AGENTS.md` supplies workspace instructions within the agent's normal instruction hierarchy.
 
 ### Agent workflow
 
@@ -111,7 +111,7 @@ werodex wait <job-id> --timeout 3600
 werodex logs <job-id>
 ```
 
-After a feature is complete, commit only its remote Source paths and record the work locally:
+After each verified Source milestone, commit its named paths on both sides and record the work locally:
 
 ```bash
 werodex checkpoint -m "Complete example feature" -- src/main.py
@@ -136,7 +136,7 @@ Use repeatable `--local-asset PATH` for local plots, screenshots, or videos; it 
 | `werodex run --detach -- CMD` | Start a persistent remote job |
 | `werodex jobs`, `wait`, `logs`, `kill` | Manage jobs and retrieve bounded output |
 | `werodex fetch ABSOLUTE_PATH` | Download one explicitly selected remote file |
-| `werodex checkpoint -m "message" -- PATH...` | Sync and commit only the named remote Source files |
+| `werodex checkpoint -m "message" -- PATH...` | Sync and commit named Source on both sides; return both SHAs and states |
 | `werodex git-tree` | Save a bounded remote Git graph and status to local `.werodex/git-tree.md` |
 | `werodex log add --file ENTRY.md [--asset REMOTE_PATH]... [--local-asset PATH]...` | Prepend a daily log, archive local or remote assets, and embed media |
 | `werodex doctor` | Check local and remote prerequisites |
@@ -159,9 +159,9 @@ Werodex classifies files as Source, ignored, large, protected remote-only data, 
 
 ### Jobs and output
 
-After a feature is verified, the agent should sync, run `checkpoint -m "message" -- PATH...` for only that feature's remote Source, and refresh `git-tree`. Local Git serves ignore and status checks; no local commit is required. At every stage verification, experiment result, completed feature, or local-only delivery, the agent must immediately write Changes, Benefits, Verification, and Next steps and call `log add --file`; recording must not wait until the whole task ends. Attach representative plots, screenshots, images, animations, and videos whenever relevant visuals exist; otherwise state why none applies. Each work day has one `.werodex/logs/logs-YYYY-MM-DD.md`, with a 04:00 Asia/Shanghai boundary and newest entries first. Repeat `--asset` for remote files and `--local-asset` for local files, up to five combined files, each capped at 32 MB. Local assets are copied rather than moved; both kinds are archived in `.werodex/assets/<work-day>/` with size and SHA-256. Images use Markdown embeds; MP4/WebM use HTML video plus a fallback file link; other formats retain links. Read the saved log and verify media previews, recording any video-preview limitation and checking the fallback link. Use absolute local paths for media displayed in chat.
+After each Source milestone is verified, the agent should run `checkpoint -m "message" -- PATH...` for its named paths on both sides and refresh `git-tree`. Every verified Source milestone requires a dual checkpoint, committing named paths in both repositories and recording both SHAs. The completion order is verification, dual checkpoint, git-tree, then work log. At every stage verification, experiment result, completed feature, or local-only delivery, the agent must immediately write Changes, Benefits, Verification, and Next steps and call `log add --file`; recording must not wait until the whole task ends. Attach representative plots, screenshots, images, animations, and videos whenever relevant visuals exist; otherwise state why none applies. Each work day has one `.werodex/logs/logs-YYYY-MM-DD.md`, with a 04:00 Asia/Shanghai boundary and newest entries first. Repeat `--asset` for remote files and `--local-asset` for local files, up to five combined files, each capped at 32 MB. Local assets are copied rather than moved; both kinds are archived in `.werodex/assets/<work-day>/` with size and SHA-256. Images use Markdown embeds; MP4/WebM use HTML video plus a fallback file link; other formats retain links. Read the saved log and verify media previews, recording any video-preview limitation and checking the fallback link. Use absolute local paths for media displayed in chat.
 
-Short commands run directly over SSH. Detached jobs use remote `tmux` and survive disconnection of the local terminal or daemon. Job logs are retained remotely with a default 256 MB per-job limit and seven-day completed-job retention. `logs` returns bounded output; `logs --raw` is available for explicit diagnosis.
+Short commands use daemon-held persistent non-PTY channels to remote tmux workers. Two control channels normally remain open, with a third reserved for transfers or explicit interaction; at most three total channels are allowed and excess requests queue. Detached jobs use remote `tmux` and survive disconnection of the local terminal or daemon. Job logs are retained remotely with a default 256 MB per-job limit and seven-day completed-job retention. `logs` returns bounded output; `logs --raw` is available for explicit diagnosis.
 
 ## Security
 
@@ -192,3 +192,13 @@ The package build uses TypeScript. Tests run with Node.js's built-in test runner
 ## License
 
 Werodex is distributed under the [Apache License 2.0](LICENSE).
+
+### Persistent connections, checkpoint recovery, and plans
+
+`werodexd` owns one SSH Master per effective target. CLI exit or ten idle minutes do not close it or the two tmux control channels; `wait` waits remotely rather than spawning repeated SSH clients. New configurations default to `maxChannels: 3`; older larger values are capped at three. A limit of two uses one control and one transfer channel, while one serializes control and transfer. rsync, fetch, shell, and attach must reuse the Master and cannot fall back to a direct connection. `status` reports channel counts, queues, reconnects, and connection attempts. Authentication failures pause and network failures back off; explicit `reconnect` resets that state.
+
+`checkpoint -m MESSAGE -- PATH...` returns JSON with an operation ID, local and remote SHAs, actual committed paths, and skipped states. Unchanged sides create no empty commit. Dual commits are not atomic: use `checkpoint --resume ID` after partial failure to finish missing steps without reverting successful commits. `log add` checks all eligible Source additions, edits, deletions, and renames before archiving anything and returns `WDX_CHECKPOINT_REQUIRED` for uncommitted work. Purely local logs establish no remote connection and explicitly mark the remote UNVERIFIED if no healthy control channel exists.
+
+Never blindly replay a disconnected write. Reconnect explicitly and use `werodex request status ID` to inspect completed, running, or unknown results. Restarting control channels does not terminate independent tmux jobs.
+
+Store all planning Markdown under `.werodex/plan/`. Run `review complete` to create it and refresh existing workspace instructions. Preview legacy migration with `werodex plan migrate --dry-run -- .werodex/FILE.md...`, then omit `--dry-run`. Only explicitly named plans move; relative links and Markdown references under `.werodex/` are repaired and failures roll back. Overview, log, and conflict documents are not moved.

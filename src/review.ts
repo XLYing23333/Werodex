@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
 import {Config,configPath,privateDirectory,readConfig,statePath,WdxError} from './core';
 import {remote} from './ssh';
+import {planDirectory} from './plans';
 
 const pending='<!-- WERODEX:REVIEW_PENDING -->';
 const treeStart='<!-- WERODEX:EXCLUDES:BEGIN -->';
@@ -20,7 +21,7 @@ export function normalizeExclude(input:string){
 function safeRead(file:string){try{const s=fs.lstatSync(file);if(!s.isFile())throw new WdxError('WDX_PATH','Managed file is not a regular file: '+file);return fs.readFileSync(file,'utf8');}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return null;throw e;}}
 function writeText(file:string,content:string,mode=0o600){const tmp=file+'.'+randomUUID()+'.tmp';try{fs.writeFileSync(tmp,content,{flag:'wx',mode});fs.renameSync(tmp,file);}catch(e){try{fs.unlinkSync(tmp);}catch{}throw e;}}
 function replaceBlock(old:string,start:string,end:string,body:string){const a=old.indexOf(start),b=old.indexOf(end);if((a>=0)!==(b>=0)||(a>=0&&b<a)||old.indexOf(start,a+start.length)>=0||old.indexOf(end,b+end.length)>=0)throw new WdxError('WDX_MANAGED_BLOCK','Malformed managed block');const block=start+'\n'+body+end;if(a<0)return old+(old&&!old.endsWith('\n')?'\n':'')+(old?'\n':'')+block+'\n';return old.slice(0,a)+block+old.slice(b+end.length);}
-export function initReview(root:string){privateDirectory(path.join(root,'.werodex'));const f=treePath(root);if(safeRead(f)!==null)throw new WdxError('WDX_REVIEW','Project tree already exists');writeText(f,`# Project tree\n\n${pending}\n\n## Overview\nReplace this line with a bounded, reviewed overview. Use \`werodex tree\` for an initial view.\n\n## Excluded paths\n${treeStart}\n(none)\n${treeEnd}\n`);writeText(reviewPath(root),JSON.stringify({status:'pending'},null,2)+'\n');}
+export function initReview(root:string){privateDirectory(path.join(root,'.werodex'));planDirectory(root);const f=treePath(root);if(safeRead(f)!==null)throw new WdxError('WDX_REVIEW','Project tree already exists');writeText(f,`# Project tree\n\n${pending}\n\n## Overview\nReplace this line with a bounded, reviewed overview. Use \`werodex tree\` for an initial view.\n\n## Excluded paths\n${treeStart}\n(none)\n${treeEnd}\n`);writeText(reviewPath(root),JSON.stringify({status:'pending'},null,2)+'\n');}
 export function isReviewed(root:string){const raw=safeRead(reviewPath(root));if(raw!==null){try{return JSON.parse(raw).status==='complete';}catch{return false;}}try{const x=JSON.parse(fs.readFileSync(statePath(root),'utf8'));return Number(x.version)>0&&!!x.lastSync;}catch{return false;}}
 export function assertReviewed(root:string){if(!isReviewed(root))throw new WdxError('WDX_REVIEW_REQUIRED','Review .werodex/project-tree.md, mark data/output paths with werodex exclude add, then run werodex review complete before syncing');}
 export function completeReview(root:string){
@@ -29,6 +30,7 @@ export function completeReview(root:string){
  // without reinitializing or discarding the existing Source baseline.
  const legacyRefresh=content===null&&isReviewed(root);
  if(!legacyRefresh&&(!content||content.includes(pending)||!content.includes('## Overview')||!/## Overview\s*\n(?:(?!## Excluded paths)[\s\S])*?\S/.test(content)||content.includes('Replace this line with a bounded, reviewed overview')))throw new WdxError('WDX_REVIEW','Complete the project tree overview and remove the pending marker first');
+ planDirectory(root);
  writeText(reviewPath(root),JSON.stringify({status:'complete',completed:new Date().toISOString()},null,2)+'\n');
 }
 export function boundedTree(root:string,relative='',depth=2,perDirectory=40,totalLimit=200){

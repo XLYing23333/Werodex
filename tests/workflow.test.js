@@ -15,7 +15,7 @@ test('Shanghai work day rolls over at 04:00',()=>{
  assert.equal(workDay(new Date('2026-09-29T20:00:00Z')),'2026-09-30');
 });
 test('daily log prepends entries and rejects excess assets without changing the log',async()=>{
- const root=temp(),state=path.join(root,'.werodex');fs.mkdirSync(state,{mode:0o700});
+ const root=temp(),state=path.join(root,'.werodex');fs.mkdirSync(state,{mode:0o700});execFileSync('git',['init','-q','-b','main',root]);
  const file=path.join(state,'entry.md');fs.writeFileSync(file,'### 修改内容\nFirst\n\n### 收益\nFaster\n');
  const c=defaultConfig('unused','/remote/project'),now=new Date('2026-09-29T20:00:00Z');
  const first=await addLog(c,root,file,[],now);assert.match(fs.readFileSync(first.log,'utf8'),/First/);
@@ -39,7 +39,7 @@ test('local-only excluded files never enter Source inventory',async()=>{
  fs.rmSync(root,{recursive:true,force:true});
 });
 test('CLI writes a no-asset local log without contacting an unreachable remote',()=>{
- const root=temp(),state=path.join(root,'.werodex');fs.mkdirSync(state,{mode:0o700});
+ const root=temp(),state=path.join(root,'.werodex');fs.mkdirSync(state,{mode:0o700});execFileSync('git',['init','-q','-b','main',root]);
  fs.writeFileSync(path.join(state,'config.json'),JSON.stringify(defaultConfig('unreachable-host-for-log-test','/remote/project')));
  const entry=path.join(state,'entry.md');fs.writeFileSync(entry,'### 修改内容\nLocal report\n\n### 收益\nAvailable offline\n');
  const r=require('node:child_process').spawnSync(process.execPath,[path.join(__dirname,'../dist/cli.js'),'log','add','--file',entry],{cwd:root,encoding:'utf8',timeout:5000});
@@ -47,15 +47,15 @@ test('CLI writes a no-asset local log without contacting an unreachable remote',
  fs.rmSync(root,{recursive:true,force:true});
 });
 test('CLI archives repeated local assets offline and embeds images and videos',()=>{
- const root=temp(),state=path.join(root,'.werodex');fs.mkdirSync(state,{mode:0o700});
+ const root=temp(),state=path.join(root,'.werodex');fs.mkdirSync(state,{mode:0o700});execFileSync('git',['init','-q','-b','main',root]);
  try{
   fs.writeFileSync(path.join(state,'config.json'),JSON.stringify(defaultConfig('unreachable-host-for-log-test','/remote/project')));
   const entry=path.join(state,'entry.md');fs.writeFileSync(entry,'### Changes\nLocal visuals\n\n### Benefits\nAvailable offline\n');
-  fs.writeFileSync(path.join(root,'image.png'),'image fixture');fs.writeFileSync(path.join(root,'video.mp4'),'video fixture');
-  const r=require('node:child_process').spawnSync(process.execPath,[path.join(__dirname,'../dist/cli.js'),'log','add','--file',entry,'--local-asset','image.png','--local-asset','video.mp4'],{cwd:root,encoding:'utf8',timeout:5000});
+  fs.writeFileSync(path.join(state,'image.png'),'image fixture');fs.writeFileSync(path.join(state,'video.mp4'),'video fixture');
+  const r=require('node:child_process').spawnSync(process.execPath,[path.join(__dirname,'../dist/cli.js'),'log','add','--file',entry,'--local-asset','.werodex/image.png','--local-asset','.werodex/video.mp4'],{cwd:root,encoding:'utf8',timeout:5000});
   assert.equal(r.status,0,r.stderr);const result=JSON.parse(r.stdout),content=fs.readFileSync(result.log,'utf8');
   assert.equal(result.assets.length,2);assert.match(content,/!\[image.png\]\(\.\.\/assets\//);assert.match(content,/<video controls.*\.mp4"><\/video>/);
-  assert.equal(fs.readFileSync(path.join(root,'image.png'),'utf8'),'image fixture');assert.equal(fs.readFileSync(path.join(root,'video.mp4'),'utf8'),'video fixture');
+  assert.equal(fs.readFileSync(path.join(state,'image.png'),'utf8'),'image fixture');assert.equal(fs.readFileSync(path.join(state,'video.mp4'),'utf8'),'video fixture');
  }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
 test('generated instructions require milestone recording, archiving and visual verification',()=>{
