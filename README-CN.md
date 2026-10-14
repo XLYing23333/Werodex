@@ -202,3 +202,17 @@ Werodex 使用 [Apache License 2.0](LICENSE) 发布。
 原生文件工具、MCP、范围阶段完成、流式日志、容量诊断及升级说明见 [工具工作流](docs/NATIVE_TOOLS.md)。通过 `review complete` 刷新现有工作区，不需重新初始化。
 
 `file read` 默认仅返回受保护或配置为排除的数据元信息；显式 `--preview` 才读取有界片段，凭据路径始终禁止。
+
+### 同步恢复快照与线路隔离
+
+同步先暂存并校验源码，再原子发布；同大小、同时间戳文件也按哈希传输。旧版本保存在本地 `.werodex/backup/<id>/local/` 或 `remote/`，不自动清理，并计入现有本地存储配额。查看与恢复：
+
+```sh
+werodex backup list
+werodex backup restore <id> --side remote -- src/main.py
+werodex backup restore <id> --side local -- src/main.py
+```
+
+恢复只允许目标仍匹配该事务发布的版本；后续修改会阻止覆盖。并发编辑会报冲突且不推进基线；若编辑恰好发生在原子交换窗口，传入版本可能已经发布，并发版本会保留为恢复快照。归档断线时远端暂存旧版本继续保留，显式恢复会先尝试归档；不要重放结果未知的发布操作。旧 `conflict restore` 继续兼容。
+
+CLI/MCP 程序运行于阻塞线路，文件与作业控制使用控制线路。一条 SSH bridge 或 tmux worker 故障只重建该线路，健康线路和独立作业继续运行；`status` 展示线路健康状态。小于三通道的配置仍按既有规则降级串行。

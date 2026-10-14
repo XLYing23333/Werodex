@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Werodex-owned worker. stdlib only; never interprets file/log content as commands."""
-import asyncio, heapq, shutil, selectors, base64, collections, hashlib, json, os, pathlib, re, signal, socket, sqlite3, stat, struct, subprocess, sys, time, uuid
+import ctypes, errno, fcntl, asyncio, heapq, shutil, selectors, base64, collections, hashlib, json, os, pathlib, re, signal, socket, sqlite3, stat, struct, subprocess, sys, time, uuid
 MAX_FRAME=65536
 MAX_MESSAGE=20*1024*1024
 CHUNK=32768
@@ -181,8 +181,16 @@ def file_operation(action,root,payload,policy):
         expression=None
         names=git(root,['ls-files','-z','--cached','--others','--exclude-standard']).stdout.split(b'\0')
         nonempty=[x for x in names if x];ignored=set(git(root,['check-ignore','--no-index','-z','--stdin'],b'\0'.join(nonempty)+b'\0').stdout.split(b'\0')) if nonempty else set()
+        selected=[]
+        for raw in dict.fromkeys(nonempty):
+            if raw in ignored:continue
+            relative=os.fsdecode(raw)
+            if name!='.' and relative!=name and not relative.startswith(name.rstrip('/')+'/'):continue
+            try:
+                target=safe(root,relative)
+                if target.is_file() and eligible(relative,target.stat().st_size,policy):selected.append(relative)
+            except (OSError,ValueError):continue
         if payload.get('regex'):
-            selected=[os.fsdecode(raw) for raw in nonempty if raw not in ignored and eligible(os.fsdecode(raw),0,policy) and (name=='.' or os.fsdecode(raw)==name or os.fsdecode(raw).startswith(name.rstrip('/')+'/'))]
             if not selected:return {'matches':[],'truncated':False,'untrusted':True}
             result=bounded(['rg','--json','--max-count','100','-e',pattern,'--',*selected],root,maximum=1048576,timeout=10)
             if result.returncode>1:raise ValueError('WDX_SEARCH: '+result.stderr.decode(errors='replace'))
@@ -194,9 +202,7 @@ def file_operation(action,root,payload,policy):
                     matches.append(item)
                     if len(matches)>=limit:break
             return {'matches':matches,'truncated':len(matches)>=limit,'untrusted':True}
-        for raw in dict.fromkeys(names):
-            if not raw or raw in ignored: continue
-            relative=os.fsdecode(raw)
+        for relative in selected:
             prefix=payload.get('path','.')
             if prefix!='.' and relative!=prefix and not relative.startswith(prefix.rstrip('/')+'/'):continue
             try:
@@ -220,6 +226,129 @@ def file_operation(action,root,payload,policy):
             except (OSError,ValueError): continue
         return {'matches':matches,'truncated':False,'untrusted':True}
     raise ValueError('WDX_USAGE: unsupported file operation')
+
+def transfer_directory(root,id):
+    if not UUID.fullmatch(id):raise ValueError('WDX_PATH: invalid transaction ID')
+    return private(private(private(pathlib.Path(root)/'.werodex')/'transfer')/id)
+
+def file_entry(file):
+    if not file.exists() and not file.is_symlink():return None
+    if file.is_symlink() or not file.is_file():raise ValueError('WDX_PATH: regular non-symlink file required')
+    before=file.stat();digest=hashlib.sha256();size=0
+    with open(file,'rb') as source:
+        for data in iter(lambda:source.read(65536),b''):
+            size+=len(data);digest.update(data)
+    after=file.stat()
+    if (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)!=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns) or size!=before.st_size:raise ValueError('WDX_CONCURRENT_CHANGE: transfer file changed while hashing')
+    return {'size':size,'hash':digest.hexdigest()}
+
+def open_parent(root,name,create=False):
+    # Pin each directory to an fd so rename cannot follow replaced parent symlinks.
+    fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:
+        parts=pathlib.PurePosixPath(name).parts
+        for part in parts[:-1]:
+            if create:
+                try:os.mkdir(part,0o755,dir_fd=fd)
+                except FileExistsError:pass
+            child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd);os.close(fd);fd=child
+        return fd,parts[-1]
+    except:os.close(fd);raise
+
+def transaction_action(name,root,payload,policy):
+    boundary(root);id=payload['id'];directory=transfer_directory(root,id)
+    files=payload.get('files',[])
+    for item in files:
+        p=item['path']
+        if not isinstance(p,str) or p.startswith('/') or any(x in ('','.', '..') for x in p.split('/')) or chr(92) in p or chr(0) in p or secret(p) or not eligible(p,item['source']['size'],policy):raise ValueError('WDX_TRANSFER_POLICY: invalid Source transfer')
+        safe(root,p,True)
+    if name=='transfer.prepare':
+        # Keep owned transaction state out of Git status without editing user rule files.
+        exclude=os.path.abspath(os.path.join(root,git(root,['rev-parse','--git-path','info/exclude']).stdout.decode().strip()))
+        if os.path.realpath(exclude)!=exclude:raise ValueError('WDX_PATH: unsafe Git exclude file')
+        pathlib.Path(exclude).parent.mkdir(parents=True,exist_ok=True)
+        fd=os.open(exclude,os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW|os.O_NONBLOCK,0o600)
+        try:
+            fcntl.flock(fd,fcntl.LOCK_EX);info=os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size>1024*1024:raise ValueError('WDX_PATH: bounded regular Git exclude file required')
+            content=os.read(fd,1024*1024)
+            if b'.werodex/' not in content.splitlines():os.write(fd,(b'' if not content or content.endswith(bytes([10])) else bytes([10]))+b'.werodex/'+bytes([10]))
+        finally:os.close(fd)
+        private(directory/'incoming');private(directory/'old')
+        for item in files:
+            for folder in ('incoming','old'):
+                target=directory/folder/item['path'];target.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+        return {'directory':str(directory)}
+    if name=='transfer.inspect':
+        result=[]
+        for item in files:
+            record_file=directory/(hashlib.sha256(item['path'].encode()).hexdigest()+'.json');record=load(record_file,{})
+            folder=record.get('oldFolder','old')
+            if folder not in ('old','incoming'):raise ValueError('WDX_PATH: invalid recovery folder')
+            actual=file_entry(safe(str(directory/folder),item['path'],True))
+            if record.get('state')=='publishing':
+                # A crash may land between exchange and journaling. Inspect both locations;
+                # archive the displaced inode without repeating the exchange.
+                incoming=file_entry(safe(str(directory/'incoming'),item['path'],True))
+                if actual is None and incoming is not None and incoming!=item['source']:
+                    actual=incoming;folder='incoming'
+                published=actual is not None or (incoming is None and file_entry(safe(root,item['path'],True))==item['source'])
+                record={**record,'state':'unknown','published':True if published else None,'old':actual,'oldFolder':folder};atomic(record_file,record)
+            result.append({'path':item['path'],**record,'old':actual if actual is not None else record.get('old'),'oldFolder':folder})
+        return {'files':result}
+    if name=='transfer.cleanup':
+        # Verify all retained versions before deleting any; an editor may still own a displaced fd.
+        for item in files:
+            folder=item.get('oldFolder','old')
+            if folder not in ('old','incoming'):raise ValueError('WDX_PATH: invalid recovery folder')
+            old=safe(str(directory/folder),item['path'],True)
+            actual=file_entry(old)
+            if actual is not None and actual!=item.get('old'):raise ValueError('WDX_CONCURRENT_CHANGE: displaced file changed after archive; recovery retained')
+        for item in files:
+            for folder in ('incoming','old'):
+                file=safe(str(directory/folder),item['path'],True)
+                if file.exists():file.unlink()
+        return {}
+    if name!='transfer.commit':raise ValueError('WDX_USAGE: unsupported transaction action')
+    rename=getattr(ctypes.CDLL(None,use_errno=True),'renameat2',None)
+    if rename is None:raise ValueError('WDX_ATOMIC_UNSUPPORTED: renameat2 unavailable')
+    rename.argtypes=[ctypes.c_int,ctypes.c_char_p,ctypes.c_int,ctypes.c_char_p,ctypes.c_uint];rename.restype=ctypes.c_int
+    results=[]
+    lock=os.open(safe(root,'.werodex/transfer/publish.lock',True),os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
+    try:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        # Recheck policy at publication, including endpoint ignore rules and target size.
+        for item in files:
+            p=item['path'];target=safe(root,p,True);old=file_entry(target)
+            ignored=git(root,['check-ignore','--no-index','-q','--',p]).returncode
+            if ignored!=1 or (old and not eligible(p,old['size'],policy)):raise ValueError('WDX_TRANSFER_POLICY: destination policy changed')
+        for item in files:
+            p=item['path'];record_file=directory/(hashlib.sha256(p.encode()).hexdigest()+'.json')
+            if record_file.exists():raise ValueError('WDX_REQUEST_UNKNOWN: transaction publication already attempted; inspect before recovery')
+            incoming=safe(str(directory/'incoming'),p);target=safe(root,p,True)
+            if file_entry(incoming)!=item['source']:raise ValueError('WDX_CONCURRENT_CHANGE: staged Source changed')
+            old=file_entry(target)
+            if old!=item.get('target'):
+                atomic(record_file,{'state':'conflict','published':False,'old':None});results.append({'path':p,'state':'conflict','published':False,'old':None});break
+            if old:os.chmod(incoming,stat.S_IMODE(target.stat().st_mode))
+            target_fd,base=open_parent(root,p,True);stage_fd,stage_base=open_parent(str(directory/'incoming'),p)
+            try:
+                atomic(record_file,{'state':'publishing','published':None})
+                if rename(stage_fd,os.fsencode(stage_base),target_fd,os.fsencode(base),2 if old else 1):
+                    code=ctypes.get_errno()
+                    if code in (errno.EEXIST,errno.ENOENT):
+                        atomic(record_file,{'state':'conflict','published':False,'old':None});results.append({'path':p,'state':'conflict','published':False,'old':None});break
+                    raise ValueError('WDX_ATOMIC_UNSUPPORTED: '+os.strerror(code))
+                if old:
+                    # The exchanged inode is the version actually overwritten, not an earlier snapshot.
+                    displaced=directory/'old'/p;os.replace(incoming,displaced);actual=file_entry(displaced)
+                else:actual=None
+                state='published' if actual==item.get('target') else 'conflict'
+                record={'state':state,'published':True,'old':actual};atomic(record_file,record);results.append({'path':p,**record})
+                if state=='conflict':break
+            finally:os.close(target_fd);os.close(stage_fd)
+        return {'files':results,'conflict':any(x['state']=='conflict' for x in results)}
+    finally:os.close(lock)
 
 def job_directory(workspace,id):
     if not UUID.fullmatch(id): raise ValueError('WDX_JOB: invalid job ID')
@@ -301,6 +430,7 @@ def git_snapshot(root,overview=False,paths=None):
     return out
 
 async def action(name,payload,root,policy,state,emit):
+    if name.startswith('transfer.'):return await asyncio.to_thread(transaction_action,name,root,payload,policy)
     if name in ('git.state','git.overview'):return await asyncio.to_thread(git_snapshot,root,name=='git.overview',payload.get('paths'))
     if name=='scan':return await asyncio.to_thread(scan,root,policy,state/'cache',payload.get('paths'),payload.get('full',False))
     if name.startswith('file.'):return await asyncio.to_thread(file_operation,name,root,payload,policy)

@@ -63,7 +63,7 @@ export class Connection {
  private requestIds=new Set<string>();private cancelled=new Set<string>();
  private wake(){for(const wake of globalWaiters)wake();globalWaiters.clear();}
  private changed(deadline:number){return new Promise<void>(resolve=>{const done=()=>{clearTimeout(timer);globalWaiters.delete(done);resolve();};const timer=setTimeout(done,Math.max(1,Math.min(1000,deadline-Date.now())));globalWaiters.add(done);});}
- private connecting?:Promise<void>;private unavailableUntil=0;private failures=0;private sock='';private id='';private closing=false;
+ private connecting?:Promise<void>;private unavailableUntil=0;private failures=0;private sock='';private id='';private closing=false;private laneFailures=[0,0];private laneUntil=[0,0];
  constructor(readonly target:string,readonly stateRoot:string,id=''){
   this.id=id;pools.add(this);
   if(id)try{const file=this.connectionStateFile();if(fs.lstatSync(file).isFile()){const saved=JSON.parse(fs.readFileSync(file,'utf8'));if(saved.version===1&&['auth-paused','backoff'].includes(saved.state)){this.state=saved.state;this.unavailableUntil=Number(saved.until)||0;this.failures=Number(saved.failures)||0;this.connectionAttempts=Number(saved.connectionAttempts)||0;this.reconnects=Number(saved.reconnects)||0;}}}catch{}
@@ -72,12 +72,12 @@ export class Connection {
  private persistFailure(){if(this.id)atomicJson(this.connectionStateFile(),{version:1,state:this.state,until:this.unavailableUntil,failures:this.failures,connectionAttempts:this.connectionAttempts,reconnects:this.reconnects});}
 
  private reap(){for(const [id,lease] of this.leases)if(processStart(lease.pid)!==lease.start)this.leases.delete(id);for(let i=0;i<2;i++)if(this.slots[i]?.dead&&this.slots[i]?.closed)this.slots[i]=undefined;}
- snapshot(){this.reap();return {state:this.state,connectionId:this.id,activeChannels:this.slots.filter(Boolean).length+this.leases.size,controlChannels:this.slots.filter(Boolean).length,transferChannels:this.leases.size,queued:this.queued,reconnects:this.reconnects,connectionAttempts:this.connectionAttempts,controlPids:this.slots.filter(Boolean).map(s=>s!.child.pid),controlAvailable:!!this.slots[0]&&!this.slots[0].busy&&!this.slots[0].dead,maxChannels:this.limit,globalActiveChannels:this.occupancy(),globalMaxChannels:3,retryAfterMs:Math.max(0,this.unavailableUntil-Date.now())};}
+ snapshot(){this.reap();return {state:this.state,connectionId:this.id,activeChannels:this.slots.filter(Boolean).length+this.leases.size,controlChannels:this.slots.filter(Boolean).length,transferChannels:this.leases.size,queued:this.queued,reconnects:this.reconnects,connectionAttempts:this.connectionAttempts,controlPids:this.slots.filter(Boolean).map(s=>s!.child.pid),controlAvailable:!!this.slots[0]&&!this.slots[0].busy&&!this.slots[0].dead,blockingAvailable:!!this.slots[1]&&!this.slots[1].busy&&!this.slots[1].dead,lanes:this.slots.map((slot,index)=>({lane:index===0?'control':'blocking',state:slot?.dead?'recovering':slot?.busy?'busy':slot?'ready':this.limit<3&&index===1?'disabled':'disconnected',retryAfterMs:Math.max(0,this.laneUntil[index]-Date.now())})),maxChannels:this.limit,globalActiveChannels:this.occupancy(),globalMaxChannels:3,retryAfterMs:Math.max(0,this.unavailableUntil-Date.now())};}
  private failure(e:unknown){if(e instanceof WdxError&&e.code==='WDX_AUTH'){this.state='auth-paused';this.persistFailure();return;}this.state='backoff';this.failures++;this.unavailableUntil=Date.now()+Math.min(60000,3000*2**Math.min(this.failures-1,5))*(0.8+Math.random()*0.4);this.persistFailure();}
- async connect(maxChannels=3,unlockPassword?:string){
+ async connect(maxChannels=3,unlockPassword?:string,deadline=Date.now()+25000){
   pools.add(this);this.limit=Math.min(this.limit,channelLimit(maxChannels));
   if(this.connecting)return this.connecting;
-  if(this.state==='ready'){for(let i=this.controls();i<2;i++){const slot=this.slots[i];if(slot){while(slot.busy)await pause(20);slot.close();await slot.exited;this.slots[i]=undefined;}}return;}
+  if(this.state==='ready'){for(let i=this.controls();i<2;i++){const slot=this.slots[i];if(slot){while(slot.busy){if(Date.now()>=deadline)throw new WdxError('WDX_CHANNEL_LIMIT','Timed out adjusting control channel limit');await pause(20);}slot.close();await slot.exited;this.slots[i]=undefined;}}return;}
   if(this.closing)throw new WdxError('WDX_REMOTE_UNAVAILABLE','Connection is closing');
   if(this.state==='auth-paused'&&unlockPassword===undefined)throw new WdxError('WDX_AUTH','Authentication paused; unlock credentials or run reconnect explicitly');
   if(Date.now()<this.unavailableUntil)throw new WdxError('WDX_REMOTE_UNAVAILABLE','Connection is in backoff; no new authentication attempt was made');
@@ -89,8 +89,8 @@ export class Connection {
     for(let i=0;i<2;i++)await reclaimClient(this.sock,this.id,i);
     this.connectionAttempts++;await ensureMaster(this.target);
     this.unavailableUntil=0;this.failures=0;
-    await this.warm();this.state='ready';fs.rmSync(this.connectionStateFile(),{force:true});
-   }catch(e){for(const slot of this.slots)slot?.close();this.slots.fill(undefined);this.failure(e);throw e;}
+    await this.warm();this.state='ready';this.laneFailures=[0,0];this.laneUntil=[0,0];fs.rmSync(this.connectionStateFile(),{force:true});
+   }catch(e){const closing=this.slots.filter(Boolean);for(const slot of closing)slot!.close();await Promise.all(closing.map(slot=>slot!.exited));this.slots.fill(undefined);this.failure(e);throw e;}
   })().finally(()=>{this.connecting=undefined;});}
   return this.connecting;
  }
@@ -110,31 +110,43 @@ export class Connection {
  }
  private resultFile(id:string){const directory=privateDirectory(path.join(this.stateRoot,'requests'));return path.join(directory,id+'.json');}
  async execute(c:Config,request:RemoteRequest,query=false){
+  let deadline=Date.now()+Math.max(25000,request.timeout);
   if(request.existingOnly&&this.state!=='ready')throw new WdxError('WDX_REMOTE_UNAVAILABLE','No existing healthy control channel');
-  if(!request.existingOnly)await this.connect(c.runtime.maxChannels);
+  if(!request.existingOnly)await this.connect(c.runtime.maxChannels,undefined,deadline);
+  deadline=Date.now()+request.timeout;
   const index=this.controls()===2&&request.lane==='blocking'?1:0;
-  const deadline=Date.now()+request.timeout;this.queued++;this.requestIds.add(request.requestId);
+  this.queued++;this.requestIds.add(request.requestId);
   try{
    for(;;){
     this.reap();if(this.cancelled.has(request.requestId))throw new WdxError('WDX_CANCELLED','Queued request cancelled');if(this.closing)throw new WdxError('WDX_REMOTE_UNAVAILABLE','Connection closed');
     if(this.state!=='ready')throw new WdxError('WDX_REMOTE_UNAVAILABLE','Persistent connection is unavailable');
+    if(Date.now()>=deadline)throw new WdxError('WDX_CHANNEL_LIMIT','Request queue deadline exceeded');
+    if(Date.now()<this.laneUntil[index]){await this.changed(Math.min(deadline,this.laneUntil[index]));continue;}
     let slot=this.slots[index];
     if(!slot){if(request.existingOnly)throw new WdxError('WDX_REMOTE_UNAVAILABLE','No existing control channel for verification');if(this.slots.filter(Boolean).length+this.leases.size<this.limit){const release=await this.reserveChannel(deadline,index);try{slot=this.slots[index];if(!slot){slot=new Channel(this.target,this.sock,this.id,index);this.slots[index]=slot;}}finally{release();}}else{if(Date.now()>deadline)throw new WdxError('WDX_CHANNEL_LIMIT','Timed out waiting for a control channel');await this.changed(deadline);continue;}}
     if(slot.busy){if(Date.now()>deadline)throw new WdxError('WDX_CHANNEL_LIMIT','Timed out in control queue');await this.changed(deadline);continue;}
     slot.busy=true;
     if(!query)atomicJson(this.resultFile(request.requestId),{requestId:request.requestId,target:this.target,state:'running',slot:index,created:new Date().toISOString()});
     try{
-     const result=await slot.execute(request,query);
+     const result=await slot.execute({...request,timeout:Math.max(1,deadline-Date.now())},query);this.laneFailures[index]=0;this.laneUntil[index]=0;
      atomicJson(this.resultFile(request.requestId),{requestId:request.requestId,target:this.target,state:result.state,slot:query?Number(request.args[0]):index,code:result.code});
      return result;
-    }catch(e){if(!query)atomicJson(this.resultFile(request.requestId),{requestId:request.requestId,target:this.target,state:'unknown',slot:index});for(const peer of this.slots)peer?.close();this.slots.fill(undefined);this.failure(e);throw e;}
+    }catch(e){
+     if(!query)atomicJson(this.resultFile(request.requestId),{requestId:request.requestId,target:this.target,state:'unknown',slot:index});
+     slot.close();await slot.exited;if(this.slots[index]===slot)this.slots[index]=undefined;
+     // A worker/bridge fault is isolated. Only a failed, read-only Master check degrades the whole pool.
+     const core=await import('./core');const master=await core.run('ssh',['-S',this.sock,'-O','check',this.target],{timeout:5000});
+     if(master.code){const peers=this.slots.filter(Boolean);for(const peer of peers)peer!.close();await Promise.all(peers.map(peer=>peer!.exited));this.slots.fill(undefined);this.failure(e);}
+     else{this.laneFailures[index]++;this.laneUntil[index]=Date.now()+Math.min(30000,250*2**Math.min(this.laneFailures[index]-1,7));}
+     throw e;
+    }
     finally{slot.busy=false;this.wake();}
    }
   }finally{this.queued--;this.requestIds.delete(request.requestId);this.cancelled.delete(request.requestId);}
  }
  async acquire(c:Config,token:string,pid:number){
   if(!/^[a-f0-9-]{36}$/.test(token)||!Number.isSafeInteger(pid)||pid<1)throw new WdxError('WDX_IPC','Invalid lease owner');const start=processStart(pid);if(!start)throw new WdxError('WDX_IPC','Lease owner has exited');
-  await this.connect(c.runtime.maxChannels);this.queued++;const deadline=Date.now()+180000;
+  const deadline=Date.now()+180000;await this.connect(c.runtime.maxChannels,undefined,deadline);this.queued++;
   try{for(;;){this.reap();if(this.closing||this.state!=='ready')throw new WdxError('WDX_REMOTE_UNAVAILABLE','Connection unavailable');
    if(this.slots.filter(Boolean).length+this.leases.size<this.limit){const release=await this.reserveChannel(deadline);try{this.leases.set(token,{pid,start});}finally{release();}return {connectionId:this.id,sock:this.sock};}
    if(this.limit===1&&this.slots[0]&&!this.slots[0]!.busy){const slot=this.slots[0]!;slot.close();await slot.exited;this.slots[0]=undefined;continue;}

@@ -1,3 +1,4 @@
+import {withWorkspaceLock} from './lock';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {randomUUID} from 'node:crypto';
@@ -49,7 +50,12 @@ function parseSide(stdout:string,paths:string[]):Side{
  if(actual.some(p=>!paths.includes(p)))throw new WdxError('WDX_GIT','Checkpoint committed an unexpected path');
  return {head:fields[1]==='-'?null:fields[1],before:fields[2]==='-'?null:fields[2],skipped:fields[0]==='SKIP',committedPaths:actual};
 }
-export async function checkpoint(c:Config,root:string,message:string,paths:string[],resume?:string){
+function verifyCommittedScript(record:CheckpointRecord,side:Side){
+ const checks=Object.entries(record.expected).map(([p,e])=>e?`[[ "$(git show HEAD:${shQuote(p)} | sha256sum | cut -d ' ' -f 1)" = ${shQuote(e.hash)} ]] || exit 22`:`! git cat-file -e HEAD:${shQuote(p)} 2>/dev/null || exit 22`).join('\n');
+ return `set -eo pipefail\n${gitBoundaryScript()}cd "$1"\nexport GIT_LITERAL_PATHSPECS=1\n${side.head?`git merge-base --is-ancestor ${shQuote(side.head)} HEAD || exit 22`:`! git rev-parse --verify HEAD >/dev/null 2>&1 || exit 22`}\n[[ -z "$(git status --porcelain --untracked-files=all -- ${record.paths.map(shQuote).join(' ')})" ]] || exit 22\n${checks}\n`;
+}
+export async function checkpoint(c:Config,root:string,message:string,paths:string[],resume?:string){return withWorkspaceLock(root,()=>checkpointLocked(c,root,message,paths,resume));}
+async function checkpointLocked(c:Config,root:string,message:string,paths:string[],resume?:string){
  await localGitRoot(root);
  let record:CheckpointRecord;const directory=stateDirectory(root);
  if(resume){
@@ -77,6 +83,8 @@ export async function checkpoint(c:Config,root:string,message:string,paths:strin
   // Check convergence again even on resume, before creating any new commit.
   const local=await new PathPolicyEngine(root,c).sourceFiles({paths:record.paths,full:true}),rem=await remoteInventory(c,[],{paths:record.paths,full:true});
   for(const p of record.paths)for(const now of [local.get(p)??null,rem.get(p)??null])if(JSON.stringify(now)!==JSON.stringify(record.expected[p]))throw new WdxError('WDX_CHECKPOINT_STALE','Source changed since checkpoint preparation: '+p);
+  if(record.local)assertGitResult(await run('bash',['-s','--',root],{input:verifyCommittedScript(record,record.local),timeout:60000}),'WDX_CHECKPOINT_STALE');
+  if(record.remote)assertGitResult(await remote(c,verifyCommittedScript(record,record.remote),[c.remote.project]),'WDX_CHECKPOINT_STALE');
   atomicJson(file,record);
   if(!record.local){const r=await run('bash',['-s','--',root,record.message],{input:commitScript(record,path.join(directory,record.id+'.local')),timeout:120000});if(r.stdout.trim())record.local=parseSide(r.stdout,record.paths);assertGitResult(r,'WDX_CHECKPOINT');record.status='partial';atomicJson(file,record);}
   if(!record.remote){
@@ -88,6 +96,8 @@ export async function checkpoint(c:Config,root:string,message:string,paths:strin
   if(!record.local||!record.remote)throw new WdxError('WDX_CHECKPOINT','Missing endpoint commit result');
   const finalLocal=await new PathPolicyEngine(root,c).sourceFiles({paths:record.paths,full:true}),finalRemote=await remoteInventory(c,[],{paths:record.paths,full:true});
   for(const p of record.paths)for(const current of [finalLocal.get(p)??null,finalRemote.get(p)??null])if(JSON.stringify(current)!==JSON.stringify(record.expected[p]))throw new WdxError('WDX_CHECKPOINT_STALE','Source changed during checkpoint: '+p);
+  assertGitResult(await run('bash',['-s','--',root],{input:verifyCommittedScript(record,record.local),timeout:60000}),'WDX_CHECKPOINT_STALE');
+  assertGitResult(await remote(c,verifyCommittedScript(record,record.remote),[c.remote.project]),'WDX_CHECKPOINT_STALE');
   record.status='complete';delete record.error;atomicJson(file,record);
   fs.writeFileSync(path.join(root,'.werodex/checkpoint'),(record.remote.head??'')+'\n',{mode:0o600});atomicJson(path.join(root,'.werodex/checkpoint-state.json'),record);
   return record;

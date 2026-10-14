@@ -19,7 +19,7 @@ export async function finish(c:Config,root:string,message:string,entry:string,pa
 }
 export async function service(c:Config,root:string,name:string,input:any){
  if(name.startsWith('file_'))return fileOperation(c,root,name.slice(5),input);
- if(name==='program_exec')return remoteAction(c,'program',{argv:input.argv},{timeout:input.timeout??60000,maxBytes:input.maxBytes??12288});
+ if(name==='program_exec')return remoteAction(c,'program',{argv:input.argv},{timeout:input.timeout??60000,maxBytes:input.maxBytes??12288,lane:'blocking'});
  if(name==='job_run')return {id:await startJob(c,input.argv)};
  if(name==='job_status')return input.id?job(c,input.id):{jobs:await jobs(c)};
  if(name==='job_wait')return waitJob(c,input.id,input.timeout??3600);

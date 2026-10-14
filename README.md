@@ -204,3 +204,17 @@ Store all planning Markdown under `.werodex/plan/`. Run `review complete` to cre
 See [native tools and bounded workflow](docs/NATIVE_TOOLS.md) for MCP, file tools, scoped finish, streaming logs, capacity diagnostics and upgrades. Refresh existing workspace instructions with `review complete`.
 
 `file read` returns metadata for configured excluded data until `--preview` is explicit. Credentials remain unavailable.
+
+### Sync recovery snapshots and lane isolation
+
+Sync stages and hashes Source before atomic publication, including files with equal size and timestamps. Displaced versions are archived locally in `.werodex/backup/<id>/local/` or `remote/`; they count toward the local state quota and are never automatically pruned.
+
+```sh
+werodex backup list
+werodex backup restore <id> --side remote -- src/main.py
+werodex backup restore <id> --side local -- src/main.py
+```
+
+Restore refuses destinations changed after that transaction. Concurrent edits report conflicts without advancing the baseline. An edit inside the atomic exchange window may leave incoming Source published, with the concurrent version retained for recovery. Archive interruptions retain remote displaced files; explicit restore first attempts to archive them. Never replay an uncertain publication. Legacy conflict restore remains compatible.
+
+CLI/MCP programs run on the blocking lane; file and job control use the control lane. Individual bridge or tmux worker failures rebuild only that lane while healthy requests and detached jobs survive. Status exposes lane health. Configurations below three channels retain their serialized fallback behavior.

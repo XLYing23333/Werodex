@@ -1,3 +1,4 @@
+import {withWorkspaceLock} from './lock';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
@@ -12,6 +13,9 @@ function resolve(root:string,input:string,missing=false){if(!input||path.isAbsol
 function editMarker(root:string,name:string){return path.join(privateDirectory(path.join(privateDirectory(path.join(root,'.werodex')),'edits')),sha(name)+'.json');}
 export async function verifyEditScope(root:string,names:string[]){for(const name of names){try{const marker=JSON.parse(fs.readFileSync(editMarker(root,name),'utf8'));if(marker.initialDirty)throw new WdxError('WDX_SCOPE_CONFLICT','Pre-existing user changes in '+name+'; select/merge the intended commit scope explicitly');}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')continue;throw e;}}}
 export async function fileOperation(c:Config,root:string,operation:string,options:FileOptions){
+ if(['write','patch'].includes(operation))return withWorkspaceLock(root,()=>fileOperationLocked(c,root,operation,options));return fileOperationLocked(c,root,operation,options);
+}
+async function fileOperationLocked(c:Config,root:string,operation:string,options:FileOptions){
  if(options.limit!==undefined&&(!Number.isSafeInteger(options.limit)||options.limit<1))throw new WdxError('WDX_USAGE','Invalid result limit');
  const name=options.path??'.',limit=Math.min(262144,Math.max(1,options.maxBytes??65536));if(!Number.isSafeInteger(limit)||!Number.isSafeInteger(options.startLine??1)||(options.startLine??1)<1)throw new WdxError('WDX_USAGE','Invalid range');
  if(options.remote){if(['write','patch'].includes(operation))throw new WdxError('WDX_PATH','Source edits are local');return (await remoteAction(c,'file.'+operation,options)).value;}
